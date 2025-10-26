@@ -1,0 +1,55 @@
+syntax = "proto3";
+
+package dividend_service;
+
+// Dividend Service
+service DividendService {
+  // Calculate dividends with bonus
+  rpc CalculateDividends(CalculateDividendsRequest) returns (CalculateDividendsResponse);
+  
+  // Get dividend history for a user
+  rpc GetDividendHistory(GetDividendHistoryRequest) returns (GetDividendHistoryResponse);
+  
+  // Process dividend data
+  rpc ProcessDividendData(ProcessDividendDataRequest) returns (ProcessDividendDataResponse);
+}
+
+message CalculateDividendsRequest {
+  double amount = 1;
+  string currency = 2;
+  string user_id = 3;
+}
+
+message CalculateDividendsResponse {
+  double original_amount = 1;
+  double calculated_dividend = 2;
+  double bonus_percentage = 3;
+  string calculated_at = 4;
+}
+
+message GetDividendHistoryRequest {
+  string user_id = 1;
+  int32 page = 2;
+  int32 limit = 3;
+}
+
+message GetDividendHistoryResponse {
+  repeated string dividends = 1; // JSON strings of dividend records
+  int32 total_dividends = 2;
+  string retrieved_at = 3;
+}
+
+message ProcessDividendDataRequest {
+  int32 record_count = 1;
+  string data_source = 2;
+  bool validate_data = 3;
+}
+
+message ProcessDividendDataResponse {
+  int32 processed_records = 1;
+  int32 successful_records = 2;
+  int32 failed_records = 3;
+  int32 processing_time_ms = 4;
+  string processed_at = 5;
+}
+

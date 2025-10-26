@@ -1,0 +1,56 @@
+syntax = "proto3";
+
+package web_content_extract;
+
+// Web Content Extract Service
+service WebContentExtract {
+  // Extract financial data from web pages
+  rpc ExtractFinancialData(ExtractFinancialDataRequest) returns (ExtractFinancialDataResponse);
+  
+  // Extract text content from web pages
+  rpc ExtractTextContent(ExtractTextContentRequest) returns (ExtractTextContentResponse);
+  
+  // Extract structured data from web pages
+  rpc ExtractStructuredData(ExtractStructuredDataRequest) returns (ExtractStructuredDataResponse);
+}
+
+message ExtractFinancialDataRequest {
+  string url = 1;
+  repeated string fields = 2; // Specific fields to extract
+  string extraction_type = 3; // e.g., "financial_data", "earnings", "dividend"
+}
+
+message ExtractFinancialDataResponse {
+  bool success = 1;
+  string data = 2; // JSON string of extracted financial data
+  double confidence_score = 3;
+  string extraction_method = 4;
+  int32 processing_time_ms = 5;
+}
+
+message ExtractTextContentRequest {
+  string url = 1;
+  string content_type = 2; // e.g., "article", "news", "report"
+  bool include_metadata = 3;
+}
+
+message ExtractTextContentResponse {
+  bool success = 1;
+  string content = 2;
+  int32 word_count = 3;
+  string language = 4;
+  string extraction_method = 5;
+}
+
+message ExtractStructuredDataRequest {
+  string url = 1;
+  string schema_type = 2; // e.g., "article", "product", "event"
+  repeated string target_fields = 3;
+}
+
+message ExtractStructuredDataResponse {
+  bool success = 1;
+  string data = 2; // JSON string of structured data
+  string extraction_method = 3;
+}
+
