@@ -17,6 +17,27 @@ mod grpc_hub {
 
 mod grpc_hub_connector;
 
+#[derive(Parser, Debug)]
+#[command(name = "grpc-hub")]
+#[command(about = "gRPC Hub - Central registry and router for gRPC services")]
+struct Args {
+    /// gRPC server port
+    #[arg(long, default_value = "50099")]
+    grpc_port: u16,
+    
+    /// HTTP server port
+    #[arg(long, default_value = "8080")]
+    http_port: u16,
+    
+    /// HTTP server host
+    #[arg(long, default_value = "0.0.0.0")]
+    http_host: String,
+    
+    /// gRPC server host
+    #[arg(long, default_value = "0.0.0.0")]
+    grpc_host: String,
+}
+
 // grpcurl-based gRPC calling functions
 async fn call_grpc_method(
     host: &str,
@@ -711,10 +732,10 @@ async fn cleanup_stale_services(hub_service: Arc<GrpcHubService>) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    let args = Args::parse();
     
-    let grpc_addr = format!("{}:{}", cli.grpc_host, cli.grpc_port);
-    let http_addr = format!("{}:{}", cli.http_host, cli.http_port);
+    let grpc_addr = format!("{}:{}", args.grpc_host, args.grpc_port);
+    let http_addr = format!("{}:{}", args.http_host, args.http_port);
     
     println!("Starting gRPC Hub Server");
     println!("gRPC server: {}", grpc_addr);
@@ -731,7 +752,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start HTTP server in background
     let http_hub = hub_service.clone();
     let http_task = tokio::spawn(async move {
-        if let Err(e) = start_http_server(http_hub, cli.http_host, cli.http_port).await {
+        if let Err(e) = start_http_server(http_hub, args.http_host, args.http_port).await {
             eprintln!("HTTP server error: {}", e);
         }
     });

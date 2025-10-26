@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use tonic::{transport::Server, Request, Response, Status};
 use chrono::Utc;
 use tonic_reflection::server::Builder;
+use clap::Parser;
 
 mod grpc_hub {
     tonic::include_proto!("grpc_hub");
@@ -23,6 +24,23 @@ mod grpc_hub_connector {
 use grpc_hub::grpc_hub_client::GrpcHubClient;
 use grpc_hub::{RegisterServiceRequest, HealthCheckRequest};
 
+#[derive(Parser, Debug)]
+#[command(name = "dividend-service")]
+#[command(about = "Dividend Service - Processes dividend data and connects to web content extract service")]
+struct Args {
+    /// Port to listen on for gRPC requests
+    #[arg(long, default_value = "8083")]
+    port: u16,
+    
+    /// gRPC Hub host address
+    #[arg(long, default_value = "127.0.0.1")]
+    grpc_hub_host: String,
+    
+    /// gRPC Hub port
+    #[arg(long, default_value = "50099")]
+    grpc_hub_port: u16,
+}
+
 // Dividend Service Implementation
 #[derive(Debug, Clone)]
 struct DividendService {
@@ -35,6 +53,13 @@ impl DividendService {
         Self {
             dividend_history: std::collections::HashMap::new(),
             hub_connector: grpc_hub_connector::GrpcHubConnector::new(),
+        }
+    }
+
+    fn new_with_hub_endpoint(hub_endpoint: String) -> Self {
+        Self {
+            dividend_history: std::collections::HashMap::new(),
+            hub_connector: grpc_hub_connector::GrpcHubConnector::with_hub_endpoint(hub_endpoint),
         }
     }
 
@@ -176,10 +201,19 @@ fn get_service_methods() -> Vec<String> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse command-line arguments
+    let args = Args::parse();
+    
     println!("💰 Dividend Service - Starting service that processes dividend data");
+    println!("📋 Configuration:");
+    println!("   - Service Port: {}", args.port);
+    println!("   - gRPC Hub: {}:{}", args.grpc_hub_host, args.grpc_hub_port);
+    
+    // Build hub endpoint from arguments
+    let hub_endpoint = format!("http://{}:{}", args.grpc_hub_host, args.grpc_hub_port);
     
     // Connect to the gRPC hub
-    let mut hub_client = GrpcHubClient::connect("http://127.0.0.1:50099").await?;
+    let mut hub_client = GrpcHubClient::connect(hub_endpoint.clone()).await?;
     
     // Register this service with the hub
     let mut metadata = HashMap::new();
@@ -194,7 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_name: "dividend-service".to_string(),
         service_version: "1.0.0".to_string(),
         service_address: "127.0.0.1".to_string(),
-        service_port: "8083".to_string(),
+        service_port: args.port.to_string(),
         methods: methods.clone(),
         metadata: metadata.clone(),
     };
@@ -205,8 +239,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service_id = register_response.service_id.clone();
     println!("✅ Registered dividend-service: {}", service_id);
     
-    // Create the dividend service instance
-    let dividend_service_instance = DividendService::new();
+    // Create the dividend service instance with the hub endpoint
+    let dividend_service_instance = DividendService::new_with_hub_endpoint(hub_endpoint);
     
     // Spawn task to poll web-content-extract service using hub connector
     let dividend_service_for_polling = dividend_service_instance.clone();
@@ -330,8 +364,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
     
-    // Start the gRPC server on port 8083
-    let addr = "127.0.0.1:8083".parse()?;
+    // Start the gRPC server on the specified port
+    let addr = format!("127.0.0.1:{}", args.port).parse()?;
     
     println!("\n🚀 Dividend Service starting on {}", addr);
     println!("🔄 Service ready to process dividend data...");

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder;
+use clap::Parser;
 
 mod grpc_hub {
     tonic::include_proto!("grpc_hub");
@@ -13,6 +14,23 @@ mod web_content_extract {
 
 use grpc_hub::grpc_hub_client::GrpcHubClient;
 use grpc_hub::{RegisterServiceRequest, HealthCheckRequest};
+
+#[derive(Parser, Debug)]
+#[command(name = "web-content-extract-service")]
+#[command(about = "Web Content Extract Service - Extracts financial data from web content")]
+struct Args {
+    /// Port to listen on for gRPC requests
+    #[arg(long, default_value = "8085")]
+    port: u16,
+    
+    /// gRPC Hub host address
+    #[arg(long, default_value = "127.0.0.1")]
+    grpc_hub_host: String,
+    
+    /// gRPC Hub port
+    #[arg(long, default_value = "50099")]
+    grpc_hub_port: u16,
+}
 
 // Helper function to extract method names from the proto service definition
 // Using a macro to extract method names at compile time from the generated code
@@ -154,10 +172,19 @@ impl web_content_extract::web_content_extract_server::WebContentExtract for WebC
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse command-line arguments
+    let args = Args::parse();
+    
     println!("🌐 Web Content Extract Service - Starting mock web scraping service");
+    println!("📋 Configuration:");
+    println!("   - Service Port: {}", args.port);
+    println!("   - gRPC Hub: {}:{}", args.grpc_hub_host, args.grpc_hub_port);
+    
+    // Build hub endpoint from arguments
+    let hub_endpoint = format!("http://{}:{}", args.grpc_hub_host, args.grpc_hub_port);
     
     // Connect to the gRPC hub
-    let mut hub_client = GrpcHubClient::connect("http://127.0.0.1:50099").await?;
+    let mut hub_client = GrpcHubClient::connect(hub_endpoint).await?;
     
     // Register this service with the hub
     let mut metadata = HashMap::new();
@@ -175,7 +202,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         service_name: "web-content-extract".to_string(),
         service_version: "2.0.0".to_string(),
         service_address: "127.0.0.1".to_string(),
-        service_port: "8085".to_string(),
+        service_port: args.port.to_string(),
         methods: methods.clone(),
         metadata: metadata.clone(),
     };
@@ -187,7 +214,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("✅ Registered web-content-extract: {}", service_id);
     
     // Start the gRPC server in a background task
-    let addr = "127.0.0.1:8085".parse()?;
+    let addr = format!("127.0.0.1:{}", args.port).parse()?;
     let web_extract_service = WebContentExtractService::new();
     
     println!("🚀 Web Content Extract Service starting on {}", addr);
