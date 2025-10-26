@@ -1,11 +1,7 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::sync::RwLock;
 use tonic::{transport::Server, Request, Response, Status};
 use chrono::Utc;
 use tonic_reflection::server::Builder;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 mod grpc_hub {
     tonic::include_proto!("grpc_hub");
@@ -19,6 +15,11 @@ mod dividend_service {
     tonic::include_proto!("dividend_service");
 }
 
+// Include the grpc_hub_connector from the parent module
+mod grpc_hub_connector {
+    include!("../grpc_hub_connector.rs");
+}
+
 use grpc_hub::grpc_hub_client::GrpcHubClient;
 use grpc_hub::{RegisterServiceRequest, HealthCheckRequest};
 
@@ -26,92 +27,24 @@ use grpc_hub::{RegisterServiceRequest, HealthCheckRequest};
 #[derive(Debug, Clone)]
 struct DividendService {
     dividend_history: std::collections::HashMap<String, Vec<serde_json::Value>>,
-    web_content_cache: Arc<RwLock<Option<(String, u16)>>>,
-    cache_timestamp: Arc<AtomicU64>,
-}
-
-#[derive(Debug, Clone)]
-struct CachedServiceInfo {
-    address: String,
-    port: u16,
-    last_updated: u64,
+    hub_connector: grpc_hub_connector::GrpcHubConnector,
 }
 
 impl DividendService {
     fn new() -> Self {
         Self {
             dividend_history: std::collections::HashMap::new(),
-            web_content_cache: Arc::new(RwLock::new(None)),
-            cache_timestamp: Arc::new(AtomicU64::new(0)),
+            hub_connector: grpc_hub_connector::GrpcHubConnector::new(),
         }
-    }
-
-    async fn get_cached_web_content_service(&self) -> Result<(String, u16), Box<dyn std::error::Error>> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-        let last_update = self.cache_timestamp.load(Ordering::Relaxed);
-        
-        // Cache is valid for 30 seconds
-        if now - last_update < 30 {
-            if let Some(cached) = self.web_content_cache.read().await.as_ref() {
-                println!("🔍 [DEBUG] Using cached web content service: {}:{}", cached.0, cached.1);
-                return Ok(cached.clone());
-            }
-        }
-        
-        println!("🔍 [DEBUG] Cache expired or empty, discovering web content service");
-        self.discover_web_content_service().await
-    }
-
-    async fn discover_web_content_service(&self) -> Result<(String, u16), Box<dyn std::error::Error>> {
-        println!("🔍 [DEBUG] discover_web_content_service: Starting service discovery");
-        
-        // Connect to the hub's gRPC API to get the web content service address and port
-        let hub_endpoint = "http://127.0.0.1:50099";
-        println!("🔍 [DEBUG] discover_web_content_service: Connecting to hub at {}", hub_endpoint);
-        
-        let mut hub_client = GrpcHubClient::connect(hub_endpoint).await?;
-        println!("🔍 [DEBUG] discover_web_content_service: Successfully connected to hub");
-        
-        // Get registered services from the hub
-        let request = tonic::Request::new(grpc_hub::ListServicesRequest {
-            filter: None,
-        });
-        println!("🔍 [DEBUG] discover_web_content_service: Requesting service list from hub");
-        
-        let response = hub_client.list_services(request).await?;
-        println!("🔍 [DEBUG] discover_web_content_service: Received service list from hub");
-        
-        let services = response.into_inner().services;
-        println!("🔍 [DEBUG] discover_web_content_service: Found {} services in hub", services.len());
-        
-        // Find web content service
-        let web_content_service = services
-            .iter()
-            .find(|s| s.service_name == "web-content-extract")
-            .ok_or("Web content service not found in hub")?;
-        
-        let address = web_content_service.service_address.clone();
-        let port = web_content_service.service_port.parse::<u16>()?;
-        
-        println!("🔍 [DEBUG] discover_web_content_service: Found web-content-extract service at {}:{}", address, port);
-        
-        // Cache the result
-        {
-            let mut cache = self.web_content_cache.write().await;
-            *cache = Some((address.clone(), port));
-        }
-        self.cache_timestamp.store(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(), Ordering::Relaxed);
-        
-        Ok((address, port))
     }
 
     async fn call_web_content_service(&self) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
         println!("🔍 [DEBUG] call_web_content_service: Starting service discovery");
         
-        // Use cached service discovery to avoid deadlock
-        let (address, port) = self.get_cached_web_content_service().await?;
+        // Use the hub connector to get the web content service address
+        let (address, port) = self.hub_connector.get_service_address("web-content-extract").await?;
         
-        // Call web content service using the cached address and port
+        // Call web content service using the discovered address and port
         let web_endpoint = format!("http://{}:{}", address, port);
         println!("🔍 [DEBUG] call_web_content_service: Connecting to web content service at {}", web_endpoint);
         
@@ -275,7 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the dividend service instance
     let dividend_service_instance = DividendService::new();
     
-    // Spawn task to poll web-content-extract service using cached discovery
+    // Spawn task to poll web-content-extract service using hub connector
     let dividend_service_for_polling = dividend_service_instance.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
@@ -285,8 +218,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("🔍 [DEBUG] Polling task: Starting polling cycle");
             println!("\n🔄 Polling web-content-extract for data...");
             
-            // Use cached service discovery to avoid deadlock
-            let (address, port) = match dividend_service_for_polling.get_cached_web_content_service().await {
+            // Use hub connector for service discovery
+            let (address, port) = match dividend_service_for_polling.hub_connector.get_service_address("web-content-extract").await {
                 Ok(addr_port) => addr_port,
                 Err(e) => {
                     println!("❌ [DEBUG] Polling task: Failed to get web content service: {}", e);

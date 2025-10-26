@@ -15,6 +15,8 @@ mod grpc_hub {
     tonic::include_proto!("grpc_hub");
 }
 
+mod grpc_hub_connector;
+
 // grpcurl-based gRPC calling functions
 async fn call_grpc_method(
     host: &str,
