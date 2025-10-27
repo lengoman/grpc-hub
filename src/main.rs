@@ -7,7 +7,7 @@ use futures_util::StreamExt;
 use tonic::{transport::Server, Request, Response, Status};
 use uuid::Uuid;
 use chrono::{DateTime, Utc};
-use std::process::Command;
+use tokio::process::Command;
 use http_body_util::BodyExt;
 
 
@@ -55,15 +55,18 @@ async fn call_grpc_method(
     let input_json = serde_json::to_string(&input)?;
     println!("🔍 [DEBUG] Hub: Input JSON: {}", input_json);
     
-    // Call grpcurl
-    println!("🔍 [DEBUG] Hub: Executing grpcurl command");
-    let output = Command::new("grpcurl")
-        .arg("-plaintext")
-        .arg("-d")
-        .arg(&input_json)
-        .arg(&address)
-        .arg(&full_method)
-        .output()?;
+    // Call grpcurl with timeout
+    println!("🔍 [DEBUG] Hub: Executing grpcurl command with timeout");
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10), // 10 second timeout
+        tokio::process::Command::new("grpcurl")
+            .arg("-plaintext")
+            .arg("-d")
+            .arg(&input_json)
+            .arg(&address)
+            .arg(&full_method)
+            .output()
+    ).await??;
     
     println!("🔍 [DEBUG] Hub: grpcurl command completed with status: {}", output.status);
     
@@ -114,7 +117,7 @@ struct ServiceInfo {
     metadata: HashMap<String, String>,
     registered_at: DateTime<Utc>,
     last_heartbeat: DateTime<Utc>,
-    status: String, // "online" or "offline"
+    status: String, // "online", "offline", or "busy"
 }
 
 impl From<ServiceInfo> for grpc_hub::ServiceInfo {
@@ -169,6 +172,66 @@ impl GrpcHubService {
     async fn add_event_sender(&self, sender: tokio::sync::broadcast::Sender<SSEEvent>) {
         let mut senders = self.event_senders.write().await;
         senders.push(sender);
+    }
+
+    async fn set_service_busy(&self, service_id: &str) {
+        println!("🔍 [DEBUG] set_service_busy: Attempting to set service {} to busy", service_id);
+        let mut services = self.services.write().await;
+        if let Some(service) = services.get_mut(service_id) {
+            println!("🔍 [DEBUG] set_service_busy: Found service {}, current status: {}", service.service_name, service.status);
+            if service.status == "online" {
+                service.status = "busy".to_string();
+                println!("🔄 Service {} is now busy", service.service_name);
+                
+                // Broadcast status change
+                self.broadcast_event(SSEEvent {
+                    event_type: "status_change".to_string(),
+                    data: serde_json::json!({
+                        "service_id": service_id,
+                        "service_name": service.service_name,
+                        "status": "busy"
+                    }).to_string(),
+                }).await;
+            } else {
+                println!("🔍 [DEBUG] set_service_busy: Service {} is not online (status: {}), not setting to busy", service.service_name, service.status);
+            }
+        } else {
+            println!("❌ [DEBUG] set_service_busy: Service {} not found in services map", service_id);
+        }
+    }
+
+    async fn set_service_online(&self, service_id: &str) {
+        let mut services = self.services.write().await;
+        if let Some(service) = services.get_mut(service_id) {
+            if service.status == "busy" {
+                service.status = "online".to_string();
+                println!("✅ Service {} is now online", service.service_name);
+                
+                // Broadcast status change
+                self.broadcast_event(SSEEvent {
+                    event_type: "status_change".to_string(),
+                    data: serde_json::json!({
+                        "service_id": service_id,
+                        "service_name": service.service_name,
+                        "status": "online"
+                    }).to_string(),
+                }).await;
+            }
+        }
+    }
+
+    async fn get_service_by_address(&self, address: &str, port: u16) -> Option<String> {
+        let services = self.services.read().await;
+        println!("🔍 [DEBUG] get_service_by_address: Looking for {}:{}", address, port);
+        println!("🔍 [DEBUG] get_service_by_address: Available services:");
+        for service in services.values() {
+            println!("  - {}:{} (ID: {})", service.service_address, service.service_port, service.service_id);
+        }
+        let result = services.values()
+            .find(|s| s.service_address == address && s.service_port == port.to_string())
+            .map(|s| s.service_id.clone());
+        println!("🔍 [DEBUG] get_service_by_address: Result: {:?}", result);
+        result
     }
 }
 
@@ -570,6 +633,15 @@ async fn handle_http_request(
                 }
             };
             
+            // Set service to busy before making the call
+            println!("🔍 [DEBUG] Hub: Looking for service at {}:{}", host, port);
+            if let Some(service_id) = hub_service.get_service_by_address(host, port).await {
+                println!("🔍 [DEBUG] Hub: Found service ID: {}, setting to busy", service_id);
+                hub_service.set_service_busy(&service_id).await;
+            } else {
+                println!("❌ [DEBUG] Hub: No service found at {}:{}", host, port);
+            }
+            
             // Call the gRPC method using grpcurl
             let result = call_grpc_method(
                 host,
@@ -578,6 +650,11 @@ async fn handle_http_request(
                 method_name,
                 input_data,
             ).await;
+            
+            // Set service back to online after the call (regardless of success/failure)
+            if let Some(service_id) = hub_service.get_service_by_address(host, port).await {
+                hub_service.set_service_online(&service_id).await;
+            }
             
             let json = match result {
                 Ok(response_data) => {

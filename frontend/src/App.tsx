@@ -2,6 +2,13 @@ import { useState, useEffect } from 'react';
 import { useEventSource } from './hooks/useEventSource';
 import './App.css';
 
+// Extend Window interface to include setServiceStatus
+declare global {
+  interface Window {
+    setServiceStatus?: (serviceId: string, status: string) => void;
+  }
+}
+
 interface Service {
   service_id: string;
   service_name: string;
@@ -12,7 +19,7 @@ interface Service {
   metadata: Record<string, string>;
   registered_at: string;
   last_heartbeat: string;
-  status: string; // "online" or "offline"
+  status: string; // "online", "offline", or "busy"
 }
 
 interface MethodSchema {
@@ -53,6 +60,25 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [selectedService, setSelectedService] = useState<string | null>(null);
+
+  // Function to update service status locally
+  const setServiceStatus = (serviceId: string, status: string) => {
+    setServices(prevServices => 
+      prevServices.map(service => 
+        service.service_id === serviceId 
+          ? { ...service, status }
+          : service
+      )
+    );
+  };
+
+  // Make setServiceStatus available globally for ServiceCard
+  useEffect(() => {
+    (window as any).setServiceStatus = setServiceStatus;
+    return () => {
+      delete (window as any).setServiceStatus;
+    };
+  }, []);
 
   // Detect system theme preference
   useEffect(() => {
@@ -254,12 +280,21 @@ function ServiceCard({
   const [requestData, setRequestData] = useState<string>('{}');
   const [showForm, setShowForm] = useState(false);
   const [isUnregistering, setIsUnregistering] = useState(false);
+  const [autoOpenResults, setAutoOpenResults] = useState(true);
 
   const testServiceMethod = async () => {
     if (!selectedMethod) return;
     
     setIsTesting(true);
     const timestamp = new Date().toISOString();
+    
+    // Set service to busy locally during the call
+    const setServiceBusy = (busy: boolean) => {
+      // This will be handled by the parent component
+      if (window.setServiceStatus) {
+        window.setServiceStatus(service.service_id, busy ? 'busy' : 'online');
+      }
+    };
     
     try {
       let request: any;
@@ -284,6 +319,9 @@ function ServiceCard({
         }
       };
 
+      // Set service to busy before making the call
+      setServiceBusy(true);
+
       const response = await fetch(`/api/grpc-call`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -307,7 +345,9 @@ function ServiceCard({
       };
       
       setTestResults(prev => [serviceCall, ...prev]);
-      setActiveTab('results');
+      if (autoOpenResults) {
+        setActiveTab('results');
+      }
     } catch (error) {
       const serviceCall: ServiceCall = {
         method: selectedMethod,
@@ -316,8 +356,12 @@ function ServiceCard({
         timestamp
       };
       setTestResults(prev => [serviceCall, ...prev]);
-      setActiveTab('results');
+      if (autoOpenResults) {
+        setActiveTab('results');
+      }
     } finally {
+      // Set service back to online after the call completes
+      setServiceBusy(false);
       setIsTesting(false);
     }
   };
@@ -349,7 +393,7 @@ function ServiceCard({
   };
 
   return (
-    <div className="service-card">
+    <div className={`service-card ${service.status === 'busy' ? 'busy' : ''}`}>
       <div className="service-header">
         <div className="service-name">{service.service_name}</div>
         <div className="service-version">v{service.service_version}</div>
@@ -357,6 +401,11 @@ function ServiceCard({
       
       <div className="service-address-bar">
         <span className="service-address">{service.service_address}:{service.service_port}</span>
+        <div className="service-status">
+          {service.status === 'online' && <span className="status-online">🟢 Online</span>}
+          {service.status === 'offline' && <span className="status-offline">🔴 Offline</span>}
+          {service.status === 'busy' && <span className="status-busy">🟠 Busy</span>}
+        </div>
         <button 
           className="unregister-button" 
           onClick={(e) => {
@@ -441,20 +490,33 @@ function ServiceCard({
                 />
               </div>
               <div className="form-actions">
-                <button
-                  className="test-button"
-                  onClick={testServiceMethod}
-                  disabled={isTesting || service.status === 'offline'}
-                  title={service.status === 'offline' ? 'Service is offline and cannot be called' : ''}
-                >
-                  {isTesting ? 'Testing...' : service.status === 'offline' ? 'Service Offline' : 'Test Method'}
-                </button>
-                <button
-                  className="cancel-button"
-                  onClick={() => setShowForm(false)}
-                >
-                  Cancel
-                </button>
+                <div className="form-controls">
+                  <label className="toggle-switch">
+                    <input
+                      type="checkbox"
+                      checked={autoOpenResults}
+                      onChange={(e) => setAutoOpenResults(e.target.checked)}
+                    />
+                    <span className="toggle-slider"></span>
+                    <span className="toggle-label">Auto-open Results</span>
+                  </label>
+                </div>
+                <div className="form-buttons">
+                  <button
+                    className="test-button"
+                    onClick={testServiceMethod}
+                    disabled={isTesting || service.status === 'offline'}
+                    title={service.status === 'offline' ? 'Service is offline and cannot be called' : ''}
+                  >
+                    {isTesting ? 'Testing...' : service.status === 'offline' ? 'Service Offline' : 'Test Method'}
+                  </button>
+                  <button
+                    className="cancel-button"
+                    onClick={() => setShowForm(false)}
+                  >
+                    Cancel
+                  </button>
+                </div>
               </div>
             </div>
           )}

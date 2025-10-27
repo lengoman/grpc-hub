@@ -945,6 +945,67 @@ body {
   border-top: 1px solid var(--border-color);
 }
 
+/* Toggle Switch Styles */
+.toggle-switch {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.toggle-switch input[type="checkbox"] {
+  display: none;
+}
+
+.toggle-slider {
+  position: relative;
+  width: 44px;
+  height: 24px;
+  background-color: var(--border-color);
+  border-radius: 12px;
+  transition: background-color 0.3s ease;
+}
+
+.toggle-slider::before {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  background-color: white;
+  border-radius: 50%;
+  transition: transform 0.3s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.toggle-switch input[type="checkbox"]:checked + .toggle-slider {
+  background-color: var(--primary);
+}
+
+.toggle-switch input[type="checkbox"]:checked + .toggle-slider::before {
+  transform: translateX(20px);
+}
+
+.toggle-label {
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* Form Controls Layout */
+.form-controls {
+  margin-bottom: 1rem;
+  padding: 0.5rem 0;
+}
+
+.form-buttons {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+}
+
 /* Responsive Design */
 @media (max-width: 850px) {
   .header-content h1 {
@@ -1001,4 +1062,45 @@ body {
   .method-button {
     width: 100%;
   }
+}
+
+/* Service Status Styles */
+.service-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status-online {
+  color: var(--success);
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.status-offline {
+  color: var(--error);
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+.status-busy {
+  color: #ff8c00;
+  font-weight: 500;
+  font-size: 0.875rem;
+}
+
+/* Service Card Busy State */
+.service-card.busy {
+  border-left: 4px solid #ff8c00;
+  background: linear-gradient(135deg, rgba(255, 140, 0, 0.05) 0%, rgba(255, 140, 0, 0.02) 100%);
+  box-shadow: 0 4px 12px rgba(255, 140, 0, 0.15);
+}
+
+.service-card.busy .service-header {
+  background: linear-gradient(135deg, rgba(255, 140, 0, 0.1) 0%, rgba(255, 140, 0, 0.05) 100%);
+}
+
+.service-card.busy .service-address-bar {
+  background: rgba(255, 140, 0, 0.05);
+  border-bottom: 1px solid rgba(255, 140, 0, 0.2);
 }

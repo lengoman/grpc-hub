@@ -42,6 +42,11 @@ impl GrpcHubConnector {
         self
     }
 
+    /// Get the hub endpoint
+    pub fn get_hub_endpoint(&self) -> String {
+        self.hub_endpoint.clone()
+    }
+
     /// Get the address and port of a service, using cache if available
     pub async fn get_service_address(&self, service_name: &str) -> Result<(String, u16)> {
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

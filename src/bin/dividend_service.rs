@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tonic::{transport::Server, Request, Response, Status};
 use chrono::Utc;
 use tonic_reflection::server::Builder;
@@ -46,6 +48,7 @@ struct Args {
 struct DividendService {
     dividend_history: std::collections::HashMap<String, Vec<serde_json::Value>>,
     hub_connector: grpc_hub_connector::GrpcHubConnector,
+    web_content_mutex: Arc<Mutex<()>>, // Mutex to prevent concurrent web content service calls
 }
 
 impl DividendService {
@@ -53,6 +56,7 @@ impl DividendService {
         Self {
             dividend_history: std::collections::HashMap::new(),
             hub_connector: grpc_hub_connector::GrpcHubConnector::new(),
+            web_content_mutex: Arc::new(Mutex::new(())),
         }
     }
 
@@ -60,58 +64,83 @@ impl DividendService {
         Self {
             dividend_history: std::collections::HashMap::new(),
             hub_connector: grpc_hub_connector::GrpcHubConnector::with_hub_endpoint(hub_endpoint),
+            web_content_mutex: Arc::new(Mutex::new(())),
         }
     }
 
     async fn call_web_content_service(&self) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
         println!("🔍 [DEBUG] call_web_content_service: Starting service discovery");
         
+        // Acquire mutex to prevent concurrent calls to web content service
+        let _guard = self.web_content_mutex.lock().await;
+        println!("🔒 [DEBUG] call_web_content_service: Acquired mutex lock");
+        
         // Use the hub connector to get the web content service address
         let (address, port) = self.hub_connector.get_service_address("web-content-extract").await?;
         
-        // Call web content service using the discovered address and port
-        let web_endpoint = format!("http://{}:{}", address, port);
-        println!("🔍 [DEBUG] call_web_content_service: Connecting to web content service at {}", web_endpoint);
+        println!("🔍 [DEBUG] call_web_content_service: Calling web content service via hub at {}:{}", address, port);
         
-        let mut web_client = web_content_extract::web_content_extract_client::WebContentExtractClient::connect(web_endpoint).await?;
-        println!("🔍 [DEBUG] call_web_content_service: Successfully connected to web content service");
+        // Call web content service through the hub to track busy status
+        let hub_endpoint = self.hub_connector.get_hub_endpoint();
+        let hub_url = format!("{}/api/grpc-call", hub_endpoint.replace("http://", "http://").replace(":50099", ":8080"));
         
-        let request = tonic::Request::new(web_content_extract::ExtractFinancialDataRequest {
-            url: "https://example.com/dividend-data".to_string(),
-            fields: vec!["dividend_amount".to_string(), "payment_date".to_string(), "stock_symbol".to_string()],
-            extraction_type: "financial_data".to_string(),
+        let request_body = serde_json::json!({
+            "service": "web_content_extract.WebContentExtract",
+            "method": "ExtractFinancialData",
+            "host": address,
+            "port": port.to_string(),
+            "input": {
+                "url": "https://example.com/dividend-data",
+                "fields": ["dividend_amount", "payment_date", "stock_symbol"],
+                "extraction_type": "financial_data"
+            }
         });
         
-        let response = web_client.extract_financial_data(request).await?;
-        let response_data = response.into_inner();
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&hub_url)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await?;
         
-        if response_data.success {
-            // Convert web content response to dividend format
-            let dividends = vec![
-                serde_json::json!({
-                    "date": "2024-01-15",
-                    "amount": 2.50,
-                    "status": "paid",
-                    "stock_symbol": "AAPL",
-                    "source": "web_content",
-                    "confidence": response_data.confidence_score,
-                    "processing_time": response_data.processing_time_ms
-                }),
-                serde_json::json!({
-                    "date": "2023-10-15", 
-                    "amount": 2.25,
-                    "status": "paid",
-                    "stock_symbol": "AAPL",
-                    "source": "web_content",
-                    "confidence": response_data.confidence_score,
-                    "processing_time": response_data.processing_time_ms
-                }),
-            ];
-            
-            Ok(dividends)
-        } else {
-            Err(format!("Web content service error: {}", response_data.data).into())
+        if !response.status().is_success() {
+            return Err(format!("Hub call failed with status: {}", response.status()).into());
         }
+        
+        let result: serde_json::Value = response.json().await?;
+        
+        if !result.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let error = result.get("error").and_then(|v| v.as_str()).unwrap_or("Unknown error");
+            return Err(format!("Web content service error: {}", error).into());
+        }
+        
+        let response_data = result.get("data").ok_or("No data in response")?;
+        
+        // Convert web content response to dividend format
+        let dividends = vec![
+            serde_json::json!({
+                "date": "2024-01-15",
+                "amount": 2.50,
+                "status": "paid",
+                "stock_symbol": "AAPL",
+                "source": "web_content",
+                "confidence": response_data.get("confidenceScore").and_then(|v| v.as_f64()).unwrap_or(0.75),
+                "processing_time": response_data.get("processingTimeMs").and_then(|v| v.as_i64()).unwrap_or(150)
+            }),
+            serde_json::json!({
+                "date": "2023-10-15", 
+                "amount": 2.25,
+                "status": "paid",
+                "stock_symbol": "AAPL",
+                "source": "web_content",
+                "confidence": response_data.get("confidenceScore").and_then(|v| v.as_f64()).unwrap_or(0.75),
+                "processing_time": response_data.get("processingTimeMs").and_then(|v| v.as_i64()).unwrap_or(150)
+            }),
+        ];
+        
+        println!("🔓 [DEBUG] call_web_content_service: Releasing mutex lock");
+        Ok(dividends)
     }
 }
 
@@ -242,61 +271,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create the dividend service instance with the hub endpoint
     let dividend_service_instance = DividendService::new_with_hub_endpoint(hub_endpoint);
     
-    // Spawn task to poll web-content-extract service using hub connector
-    let dividend_service_for_polling = dividend_service_instance.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
-        loop {
-            interval.tick().await;
-            
-            println!("🔍 [DEBUG] Polling task: Starting polling cycle");
-            println!("\n🔄 Polling web-content-extract for data...");
-            
-            // Use hub connector for service discovery
-            let (address, port) = match dividend_service_for_polling.hub_connector.get_service_address("web-content-extract").await {
-                Ok(addr_port) => addr_port,
-                Err(e) => {
-                    println!("❌ [DEBUG] Polling task: Failed to get web content service: {}", e);
-                    continue;
-                }
-            };
-            
-            let endpoint = format!("http://{}:{}", address, port);
-            let mut client = match web_content_extract::web_content_extract_client::WebContentExtractClient::connect(endpoint.clone()).await {
-                Ok(client) => client,
-                Err(e) => {
-                    println!("❌ Failed to connect to web-content-extract at {}: {}", endpoint, e);
-                    continue;
-                }
-            };
-            
-            let request = tonic::Request::new(web_content_extract::ExtractFinancialDataRequest {
-                url: "https://example.com/dividend-data".to_string(),
-                fields: vec!["dividend_amount".to_string(), "payment_date".to_string(), "stock_symbol".to_string()],
-                extraction_type: "financial_data".to_string(),
-            });
-            
-            let response_data = match client.extract_financial_data(request).await {
-                Ok(response) => response.into_inner(),
-                Err(e) => {
-                    println!("❌ Failed to call web-content-extract: {}", e);
-                    continue;
-                }
-            };
-            
-            match (response_data.success, serde_json::from_str::<serde_json::Value>(&response_data.data)) {
-                (true, Ok(json_data)) => {
-                    println!("✅ Successfully received data from web-content-extract");
-                    if let Some(dividend_amount) = json_data.get("dividend_amount").and_then(|v| v.as_f64()) {
-                        let calculated_dividend = dividend_amount * 1.1;
-                        println!("💰 Calculated dividend: ${:.2}", calculated_dividend);
-                    }
-                }
-                (false, _) => println!("❌ web-content-extract returned unsuccessful response"),
-                (true, Err(e)) => println!("❌ Failed to parse response data: {}", e),
-            }
-        }
-    });
+    // Note: Polling task removed to prevent race conditions with user requests
+    // The dividend service works on-demand when users call GetDividendHistory
     
     // Spawn heartbeat task
     let service_id_for_heartbeat = service_id.clone();
