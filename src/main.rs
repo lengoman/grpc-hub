@@ -17,6 +17,7 @@ mod grpc_hub {
 
 mod grpc_hub_connector;
 
+
 #[derive(Parser, Debug)]
 #[command(name = "grpc-hub")]
 #[command(about = "gRPC Hub - Central registry and router for gRPC services")]
@@ -232,6 +233,48 @@ impl GrpcHubService {
             .map(|s| s.service_id.clone());
         println!("🔍 [DEBUG] get_service_by_address: Result: {:?}", result);
         result
+    }
+
+    /// Get the best available service by name (prioritizes online, non-busy services)
+    async fn get_best_service_by_name(&self, service_name: &str) -> Option<(String, String, u16)> {
+        let services = self.services.read().await;
+        
+        println!("🔍 [DEBUG] get_best_service_by_name: Looking for service '{}'", service_name);
+        
+        // Find all services with the matching name
+        let matching_services: Vec<_> = services.values()
+            .filter(|service| service.service_name == service_name)
+            .collect();
+        
+        if matching_services.is_empty() {
+            println!("❌ [DEBUG] get_best_service_by_name: No services found with name '{}'", service_name);
+            return None;
+        }
+        
+        println!("🔍 [DEBUG] get_best_service_by_name: Found {} services with name '{}'", matching_services.len(), service_name);
+        
+        // Prioritize services that are online and not busy
+        let online_services: Vec<_> = matching_services.iter()
+            .filter(|service| service.status == "online")
+            .collect();
+        
+        let selected_service = if !online_services.is_empty() {
+            println!("✅ [DEBUG] get_best_service_by_name: Found {} online services, selecting first", online_services.len());
+            online_services[0]
+        } else {
+            println!("⚠️  [DEBUG] get_best_service_by_name: No online services, selecting first available");
+            matching_services[0]
+        };
+        
+        let port = selected_service.service_port.parse::<u16>().ok()?;
+        println!("🎯 [DEBUG] get_best_service_by_name: Selected service at {}:{} (status: {})", 
+                 selected_service.service_address, port, selected_service.status);
+        
+        Some((
+            selected_service.service_id.clone(),
+            selected_service.service_address.clone(),
+            port
+        ))
     }
 }
 
@@ -609,8 +652,8 @@ async fn handle_http_request(
                 }
             };
             
-            // Extract request parameters
-            let (service_name, method_name, host, port, input_data) = match (
+            // Extract request parameters - support both service name only and host+port
+            let (service_name, method_name, host, port, input_data): (String, String, String, u16, serde_json::Value) = match (
                 request.get("service").and_then(|v| v.as_str()),
                 request.get("method").and_then(|v| v.as_str()),
                 request.get("host").and_then(|v| v.as_str()),
@@ -618,12 +661,37 @@ async fn handle_http_request(
                 request.get("input").cloned(),
             ) {
                 (Some(svc), Some(meth), Some(hst), Some(prt), inp_data) => {
-                    (svc, meth, hst, prt, inp_data.unwrap_or(serde_json::json!({})))
+                    // Direct addressing mode: host and port provided
+                    (svc.to_string(), meth.to_string(), hst.to_string(), prt, inp_data.unwrap_or(serde_json::json!({})))
+                }
+                (Some(svc), Some(meth), None, None, inp_data) => {
+                    // Intelligent selection mode: only service name provided
+                    // Extract service name from full gRPC service name (e.g., "web_content_extract.WebContentExtract" -> "web-content-extract")
+                    let short_service_name = svc.split('.').next().unwrap_or(svc)
+                        .replace("_", "-")
+                        .to_lowercase();
+                    
+                    println!("🔍 [DEBUG] Hub: Intelligent selection mode for service: {}", short_service_name);
+                    
+                    if let Some((service_id, selected_host, selected_port)) = hub_service.get_best_service_by_name(&short_service_name).await {
+                        println!("🎯 [DEBUG] Hub: Selected service {} at {}:{}", service_id, selected_host, selected_port);
+                        (svc.to_string(), meth.to_string(), selected_host, selected_port, inp_data.unwrap_or(serde_json::json!({})))
+                    } else {
+                        let json = serde_json::json!({
+                            "success": false,
+                            "error": format!("No available service found for '{}'", short_service_name)
+                        });
+                        return Ok(hyper::Response::builder()
+                            .status(404)
+                            .header("content-type", "application/json")
+                            .body(full_response(Bytes::from(json.to_string())))
+                            .unwrap());
+                    }
                 }
                 _ => {
                     let json = serde_json::json!({
                         "success": false,
-                        "error": "Missing required fields: service, method, host, port"
+                        "error": "Missing required fields: service, method, and either (host, port) or service name for intelligent selection"
                     });
                     return Ok(hyper::Response::builder()
                         .status(400)
@@ -635,7 +703,7 @@ async fn handle_http_request(
             
             // Set service to busy before making the call
             println!("🔍 [DEBUG] Hub: Looking for service at {}:{}", host, port);
-            if let Some(service_id) = hub_service.get_service_by_address(host, port).await {
+            if let Some(service_id) = hub_service.get_service_by_address(&host, port).await {
                 println!("🔍 [DEBUG] Hub: Found service ID: {}, setting to busy", service_id);
                 hub_service.set_service_busy(&service_id).await;
             } else {
@@ -644,15 +712,15 @@ async fn handle_http_request(
             
             // Call the gRPC method using grpcurl
             let result = call_grpc_method(
-                host,
+                &host,
                 port,
-                service_name,
-                method_name,
+                &service_name,
+                &method_name,
                 input_data,
             ).await;
             
             // Set service back to online after the call (regardless of success/failure)
-            if let Some(service_id) = hub_service.get_service_by_address(host, port).await {
+            if let Some(service_id) = hub_service.get_service_by_address(&host, port).await {
                 hub_service.set_service_online(&service_id).await;
             }
             

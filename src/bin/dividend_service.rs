@@ -87,8 +87,6 @@ impl DividendService {
         let request_body = serde_json::json!({
             "service": "web_content_extract.WebContentExtract",
             "method": "ExtractFinancialData",
-            "host": address,
-            "port": port.to_string(),
             "input": {
                 "url": "https://example.com/dividend-data",
                 "fields": ["dividend_amount", "payment_date", "stock_symbol"],

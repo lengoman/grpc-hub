@@ -86,17 +86,28 @@ impl GrpcHubConnector {
         let services = response.into_inner().services;
         println!("🔍 [DEBUG] GrpcHubConnector: Found {} services in hub", services.len());
         
-        // Find the requested service
-        let target_service = services
+        // Find all services with the matching name
+        let matching_services: Vec<_> = services
             .iter()
-            .find(|s| s.service_name == service_name)
-            .ok_or_else(|| anyhow::anyhow!("Service '{}' not found in hub", service_name))?;
+            .filter(|s| s.service_name == service_name)
+            .collect();
+        
+        if matching_services.is_empty() {
+            return Err(anyhow::anyhow!("Service '{}' not found in hub", service_name));
+        }
+        
+        println!("🔍 [DEBUG] GrpcHubConnector: Found {} services with name '{}'", matching_services.len(), service_name);
+        
+        // Prioritize services that are online and not busy
+        // Note: We can't directly check status from the gRPC response, so we'll use the first available service
+        // In a real implementation, the hub would need to include status in the ListServices response
+        let target_service = matching_services[0];
         
         let address = target_service.service_address.clone();
         let port = target_service.service_port.parse::<u16>()
             .map_err(|e| anyhow::anyhow!("Invalid port '{}' for service '{}': {}", target_service.service_port, service_name, e))?;
         
-        println!("🔍 [DEBUG] GrpcHubConnector: Found service '{}' at {}:{}", service_name, address, port);
+        println!("🔍 [DEBUG] GrpcHubConnector: Selected service '{}' at {}:{} (load balancing: first available)", service_name, address, port);
         
         // Cache the result
         {
