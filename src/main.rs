@@ -133,7 +133,7 @@ impl From<ServiceInfo> for grpc_hub::ServiceInfo {
             metadata: info.metadata,
             registered_at: info.registered_at.to_rfc3339(),
             last_heartbeat: info.last_heartbeat.to_rfc3339(),
-            status: "online".to_string(), // Default to online
+            status: info.status, // Use actual status from the service
         }
     }
 }
@@ -275,6 +275,106 @@ impl GrpcHubService {
             selected_service.service_address.clone(),
             port
         ))
+    }
+
+    /// Mark a service as offline instantly when a connection fails
+    async fn mark_service_offline(&self, service_id: &str, reason: &str) {
+        let service_name = {
+            let mut services = self.services.write().await;
+            if let Some(service) = services.get_mut(service_id) {
+                let was_online = service.status == "online" || service.status == "busy";
+                service.status = "offline".to_string();
+                let service_name = service.service_name.clone();
+                
+                println!("🔴 Service {} (ID: {}) marked offline: {}", service_name, service_id, reason);
+                println!("   Status updated to: {}", service.status);
+                
+                if was_online {
+                    Some(service_name)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }; // Lock is dropped here after status is updated
+        
+        // Broadcast status change after releasing the lock
+        if let Some(name) = service_name {
+            self.broadcast_event(SSEEvent {
+                event_type: "status_change".to_string(),
+                data: serde_json::json!({
+                    "service_id": service_id,
+                    "service_name": name,
+                    "status": "offline",
+                    "reason": reason
+                }).to_string(),
+            }).await;
+        }
+    }
+
+    /// Perform active health check on a service
+    async fn health_check_service(&self, service_id: &str, service_address: &str, service_port: u16) -> bool {
+        // Try to connect to the service's gRPC endpoint
+        let address = format!("{}:{}", service_address, service_port);
+        
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2), // 2 second timeout for health checks
+            tokio::net::TcpStream::connect(&address)
+        ).await {
+            Ok(Ok(_)) => {
+                // Connection successful
+                true
+            }
+            Ok(Err(e)) => {
+                println!("🔍 [HEALTH] Service {} connection failed: {}", address, e);
+                false
+            }
+            Err(_) => {
+                println!("🔍 [HEALTH] Service {} connection timeout", address);
+                false
+            }
+        }
+    }
+
+    /// Start active health monitoring for all services
+    async fn start_health_monitoring(&self) {
+        let hub_service = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5)); // Check every 5 seconds
+            
+            loop {
+                interval.tick().await;
+                
+                // Get all services for health checking
+                let services_to_check: Vec<(String, String, u16)> = {
+                    let services = hub_service.services.read().await;
+                    services.values()
+                        .filter(|s| s.status == "online" || s.status == "busy")
+                        .map(|s| (s.service_id.clone(), s.service_address.clone(), s.service_port.parse().unwrap_or(0)))
+                        .collect()
+                };
+                
+                // Check each service
+                for (service_id, address, port) in services_to_check {
+                    if port == 0 {
+                        continue; // Skip invalid ports
+                    }
+                    
+                    let is_healthy = hub_service.health_check_service(&service_id, &address, port).await;
+                    
+                    if !is_healthy {
+                        hub_service.mark_service_offline(&service_id, "Health check failed").await;
+                        
+                        // Verify the status was actually updated
+                        let services = hub_service.services.read().await;
+                        if let Some(service) = services.get(&service_id) {
+                            println!("   ✅ Verified: Service status in map is now: {}", service.status);
+                        }
+                    }
+                }
+            }
+        });
     }
 }
 
@@ -719,22 +819,45 @@ async fn handle_http_request(
                 input_data,
             ).await;
             
-            // Set service back to online after the call (regardless of success/failure)
-            if let Some(service_id) = hub_service.get_service_by_address(&host, port).await {
-                hub_service.set_service_online(&service_id).await;
-            }
-            
             let json = match result {
                 Ok(response_data) => {
+                    // Set service back to online after successful call
+                    if let Some(service_id) = hub_service.get_service_by_address(&host, port).await {
+                        hub_service.set_service_online(&service_id).await;
+                    }
+                    
                     serde_json::json!({
                         "success": true,
                         "data": response_data
                     })
                 }
                 Err(e) => {
+                    let error_msg = e.to_string();
+                    
+                    // Instantly mark service as offline if direct connection to THIS service failed
+                    // Check if the error is about connecting to the target service (not a downstream service)
+                    let is_direct_connection_failure = 
+                        (error_msg.contains("connection refused") || 
+                         error_msg.contains("connection reset") ||
+                         error_msg.contains("connection error")) &&
+                        !error_msg.contains("Web content service") && // Not a downstream service error
+                        !error_msg.contains("unavailable:"); // Not a gRPC service-level error
+                    
+                    if is_direct_connection_failure {
+                        if let Some(service_id) = hub_service.get_service_by_address(&host, port).await {
+                            println!("🔴 [INSTANT] Detected direct service failure at {}:{}", host, port);
+                            hub_service.mark_service_offline(&service_id, "Direct connection failed").await;
+                        }
+                    } else {
+                        // For other errors (including downstream service failures), just set back to online
+                        if let Some(service_id) = hub_service.get_service_by_address(&host, port).await {
+                            hub_service.set_service_online(&service_id).await;
+                        }
+                    }
+                    
                     serde_json::json!({
                         "success": false,
-                        "error": e.to_string()
+                        "error": error_msg
                     })
                 }
             };
@@ -893,6 +1016,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::spawn(async move {
         cleanup_stale_services(cleanup_hub).await;
     });
+    
+    // Start active health monitoring
+    println!("🏥 Starting health monitoring (checks every 5 seconds)");
+    hub_service.start_health_monitoring().await;
     
     // Start HTTP server in background
     let http_hub = hub_service.clone();
