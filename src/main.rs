@@ -719,6 +719,113 @@ async fn handle_http_request(
                 .body(full_response(Bytes::from(json.to_string())))
                 .unwrap())
         }
+        (&Method::POST, "/api/service-status") => {
+            // Read request body
+            let bytes = match http_body_util::BodyExt::collect(req.into_body()).await {
+                Ok(body) => body.to_bytes(),
+                Err(_) => {
+                    let json = serde_json::json!({
+                        "success": false,
+                        "error": "Failed to read request body"
+                    });
+                    return Ok(hyper::Response::builder()
+                        .status(400)
+                        .header("content-type", "application/json")
+                        .body(full_response(Bytes::from(json.to_string())))
+                        .unwrap());
+                }
+            };
+            let body_str = String::from_utf8_lossy(&bytes);
+            
+            let request: serde_json::Value = match serde_json::from_str(&body_str) {
+                Ok(req) => req,
+                Err(_) => {
+                    let json = serde_json::json!({
+                        "success": false,
+                        "error": "Invalid JSON request"
+                    });
+                    return Ok(hyper::Response::builder()
+                        .status(400)
+                        .header("content-type", "application/json")
+                        .body(full_response(Bytes::from(json.to_string())))
+                        .unwrap());
+                }
+            };
+            
+            // Extract service_id and status
+            let (service_id, status) = match (
+                request.get("service_id").and_then(|v| v.as_str()),
+                request.get("status").and_then(|v| v.as_str()),
+            ) {
+                (Some(id), Some(st)) => (id, st),
+                _ => {
+                    let json = serde_json::json!({
+                        "success": false,
+                        "error": "Missing required fields: service_id, status"
+                    });
+                    return Ok(hyper::Response::builder()
+                        .status(400)
+                        .header("content-type", "application/json")
+                        .body(full_response(Bytes::from(json.to_string())))
+                        .unwrap());
+                }
+            };
+            
+            // Update service status
+            let service_name = {
+                let mut services = hub_service.services.write().await;
+                if let Some(service) = services.get_mut(service_id) {
+                    let old_status = service.status.clone();
+                    service.status = status.to_string();
+                    let service_name = service.service_name.clone();
+                    
+                    println!("🔄 Service {} status changed: {} -> {}", service_name, old_status, status);
+                    
+                    if old_status != status {
+                        Some(service_name)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }; // Lock is dropped here
+            
+            // Broadcast status change if it actually changed
+            if let Some(name) = service_name {
+                hub_service.broadcast_event(SSEEvent {
+                    event_type: "status_change".to_string(),
+                    data: serde_json::json!({
+                        "service_id": service_id,
+                        "service_name": name,
+                        "status": status,
+                        "reason": "Service reported status change"
+                    }).to_string(),
+                }).await;
+                
+                let json = serde_json::json!({
+                    "success": true,
+                    "message": format!("Service {} status updated to {}", service_id, status)
+                });
+                
+                Ok(hyper::Response::builder()
+                    .status(200)
+                    .header("content-type", "application/json")
+                    .body(full_response(Bytes::from(json.to_string())))
+                    .unwrap())
+            } else {
+                let json = serde_json::json!({
+                    "success": false,
+                    "error": format!("Service {} not found", service_id)
+                });
+                
+                Ok(hyper::Response::builder()
+                    .status(404)
+                    .header("content-type", "application/json")
+                    .body(full_response(Bytes::from(json.to_string())))
+                    .unwrap())
+            }
+        }
         (&Method::POST, "/api/grpc-call") => {
             // Read request body using http-body-util
             let bytes = match http_body_util::BodyExt::collect(req.into_body()).await {

@@ -6,6 +6,10 @@ use chrono::Utc;
 use tonic_reflection::server::Builder;
 use clap::Parser;
 
+mod grpc_hub_connector {
+    include!("../grpc_hub_connector.rs");
+}
+
 mod grpc_hub {
     tonic::include_proto!("grpc_hub");
 }
@@ -18,10 +22,6 @@ mod dividend_service {
     tonic::include_proto!("dividend_service");
 }
 
-// Include the grpc_hub_connector from the parent module
-mod grpc_hub_connector {
-    include!("../grpc_hub_connector.rs");
-}
 
 use grpc_hub::grpc_hub_client::GrpcHubClient;
 use grpc_hub::{RegisterServiceRequest, HealthCheckRequest};
@@ -49,6 +49,7 @@ struct DividendService {
     dividend_history: std::collections::HashMap<String, Vec<serde_json::Value>>,
     hub_connector: grpc_hub_connector::GrpcHubConnector,
     web_content_mutex: Arc<Mutex<()>>, // Mutex to prevent concurrent web content service calls
+    service_id: Option<String>, // Store the actual service ID
 }
 
 impl DividendService {
@@ -57,6 +58,7 @@ impl DividendService {
             dividend_history: std::collections::HashMap::new(),
             hub_connector: grpc_hub_connector::GrpcHubConnector::new(),
             web_content_mutex: Arc::new(Mutex::new(())),
+            service_id: None,
         }
     }
 
@@ -65,7 +67,23 @@ impl DividendService {
             dividend_history: std::collections::HashMap::new(),
             hub_connector: grpc_hub_connector::GrpcHubConnector::with_hub_endpoint(hub_endpoint),
             web_content_mutex: Arc::new(Mutex::new(())),
+            service_id: None,
         }
+    }
+
+    fn new_with_service_id(hub_endpoint: String, service_id: String) -> Self {
+        Self {
+            dividend_history: std::collections::HashMap::new(),
+            hub_connector: grpc_hub_connector::GrpcHubConnector::with_hub_endpoint(hub_endpoint),
+            web_content_mutex: Arc::new(Mutex::new(())),
+            service_id: Some(service_id),
+        }
+    }
+
+    /// Get the current service ID from the hub
+    async fn get_service_id(&self) -> Option<String> {
+        println!("🔍 [DEBUG] get_service_id: Returning service_id: {:?}", self.service_id);
+        self.service_id.clone()
     }
 
     async fn call_web_content_service(&self) -> Result<Vec<serde_json::Value>, Box<dyn std::error::Error>> {
@@ -175,21 +193,50 @@ impl dividend_service::dividend_service_server::DividendService for DividendServ
         let req = request.into_inner();
         println!("🔍 [DEBUG] GetDividendHistory: Method called for user: {}", req.user_id);
         
-        // Call web content service - fail if unavailable
-        println!("🔍 [DEBUG] GetDividendHistory: About to call web content service");
-        let web_content_data = self.call_web_content_service().await
-            .map_err(|e| {
-                println!("❌ [DEBUG] GetDividendHistory: Failed to get web content data: {}", e);
-                Status::unavailable(format!("Web content service unavailable: {}", e))
-            })?;
+        // Get service ID for status reporting
+        let service_id = self.get_service_id().await;
         
-        println!("🔍 [DEBUG] GetDividendHistory: Successfully received web content data");
+        // Report busy status (fire-and-forget, no blocking)
+        if let Some(id) = &service_id {
+            let hub_connector = self.hub_connector.clone();
+            let service_id_clone = id.clone();
+            
+            // Fire-and-forget task - don't wait for completion
+            tokio::spawn(async move {
+                let _ = hub_connector.set_service_busy(&service_id_clone).await;
+            });
+        }
         
-        Ok(Response::new(dividend_service::GetDividendHistoryResponse {
-            dividends: web_content_data.iter().map(|d| d.to_string()).collect(),
-            total_dividends: web_content_data.len() as i32,
-            retrieved_at: Utc::now().to_rfc3339(),
-        }))
+        let result = async {
+            // Call web content service - fail if unavailable
+            println!("🔍 [DEBUG] GetDividendHistory: About to call web content service");
+            let web_content_data = self.call_web_content_service().await
+                .map_err(|e| {
+                    println!("❌ [DEBUG] GetDividendHistory: Failed to get web content data: {}", e);
+                    Status::unavailable(format!("Web content service unavailable: {}", e))
+                })?;
+            
+            println!("🔍 [DEBUG] GetDividendHistory: Successfully received web content data");
+            
+            Ok(Response::new(dividend_service::GetDividendHistoryResponse {
+                dividends: web_content_data.iter().map(|d| d.to_string()).collect(),
+                total_dividends: web_content_data.len() as i32,
+                retrieved_at: Utc::now().to_rfc3339(),
+            }))
+        }.await;
+        
+        // Report online status (fire-and-forget, no blocking)
+        if let Some(id) = &service_id {
+            let hub_connector = self.hub_connector.clone();
+            let service_id_clone = id.clone();
+            
+            // Fire-and-forget task - don't wait for completion
+            tokio::spawn(async move {
+                let _ = hub_connector.set_service_online(&service_id_clone).await;
+            });
+        }
+        
+        result
     }
 
     async fn process_dividend_data(
@@ -266,8 +313,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service_id = register_response.service_id.clone();
     println!("✅ Registered dividend-service: {}", service_id);
     
-    // Create the dividend service instance with the hub endpoint
-    let dividend_service_instance = DividendService::new_with_hub_endpoint(hub_endpoint);
+    // Create the dividend service instance with the hub endpoint and service ID
+    let dividend_service_instance = DividendService::new_with_service_id(hub_endpoint, service_id.clone());
     
     // Note: Polling task removed to prevent race conditions with user requests
     // The dividend service works on-demand when users call GetDividendHistory

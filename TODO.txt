@@ -1,6 +1,7 @@
 1. Add rpcconnector to have realtime status updates for online/offline and other services - done with SSE
 2. allow broadcasting, so if there are more than one service with the same capability
 the run the job and the first one to respond wins
-3. when a service is processing change from online to busy, when it is no longer busy put back to online
+3. when a service is processing change from online to busy, when it is no longer busy put back to online - done
 4. when a grpc_hub_connector gets a service make sure grpc_hub gives a service that it is not busy, if
-all of the services are busy then give a random service that match the name requested.
+all of the services are busy then give a random service that match the name requested. - done
+5. If all the services are busy then create a stack of calls to the service and wait until the service is back online.

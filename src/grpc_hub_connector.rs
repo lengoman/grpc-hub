@@ -163,6 +163,64 @@ impl GrpcHubConnector {
         let last_update = self.cache_timestamp.load(Ordering::Relaxed);
         (has_cached, last_update)
     }
+
+    /// Set service status to busy (optimized for speed)
+    pub async fn set_service_busy(&self, service_id: &str) -> Result<()> {
+        let hub_endpoint = self.get_hub_endpoint();
+        let hub_url = format!("{}/api/service-status", hub_endpoint.replace("http://", "http://").replace(":50099", ":8080"));
+        
+        let request_body = serde_json::json!({
+            "service_id": service_id,
+            "status": "busy"
+        });
+        
+        // Single attempt with short timeout for speed
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(50)) // 50ms timeout
+            .build()?;
+            
+        let response = client
+            .post(&hub_url)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to set service busy: {}", response.status()));
+        }
+        
+        Ok(())
+    }
+
+    /// Set service status to online (optimized for speed)
+    pub async fn set_service_online(&self, service_id: &str) -> Result<()> {
+        let hub_endpoint = self.get_hub_endpoint();
+        let hub_url = format!("{}/api/service-status", hub_endpoint.replace("http://", "http://").replace(":50099", ":8080"));
+        
+        let request_body = serde_json::json!({
+            "service_id": service_id,
+            "status": "online"
+        });
+        
+        // Single attempt with short timeout for speed
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(50)) // 50ms timeout
+            .build()?;
+            
+        let response = client
+            .post(&hub_url)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
+            .send()
+            .await?;
+        
+        if !response.status().is_success() {
+            return Err(anyhow::anyhow!("Failed to set service online: {}", response.status()));
+        }
+        
+        Ok(())
+    }
 }
 
 impl Default for GrpcHubConnector {

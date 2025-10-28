@@ -3,6 +3,10 @@ use tonic::{transport::Server, Request, Response, Status};
 use tonic_reflection::server::Builder;
 use clap::Parser;
 
+mod grpc_hub_connector {
+    include!("../grpc_hub_connector.rs");
+}
+
 mod grpc_hub {
     tonic::include_proto!("grpc_hub");
 }
@@ -58,6 +62,8 @@ fn get_service_methods() -> Vec<String> {
 struct WebContentExtractService {
     // In-memory storage for extracted content
     extracted_data: std::collections::HashMap<String, serde_json::Value>,
+    hub_connector: grpc_hub_connector::GrpcHubConnector,
+    service_id: Option<String>,
 }
 
 impl WebContentExtractService {
@@ -85,7 +91,42 @@ impl WebContentExtractService {
                 "growth_rate": 0.08
             }));
         
-        Self { extracted_data }
+        Self { 
+            extracted_data,
+            hub_connector: grpc_hub_connector::GrpcHubConnector::new(),
+            service_id: None,
+        }
+    }
+
+    fn new_with_service_id(hub_endpoint: String, service_id: String) -> Self {
+        let mut extracted_data = std::collections::HashMap::new();
+        
+        // Pre-populate with some sample financial data
+        extracted_data.insert("https://financial-data.com/dividend-info".to_string(), 
+            serde_json::json!({
+                "dividend_amount": 2.50,
+                "payment_date": "2024-01-15",
+                "stock_symbol": "AAPL",
+                "company_name": "Apple Inc.",
+                "ex_dividend_date": "2024-01-08",
+                "dividend_frequency": "quarterly",
+                "yield_percentage": 0.45
+            }));
+            
+        extracted_data.insert("https://financial-data.com/earnings".to_string(),
+            serde_json::json!({
+                "revenue": 123900000000i64,
+                "net_income": 33980000000i64,
+                "eps": 2.18,
+                "quarter": "Q4 2023",
+                "growth_rate": 0.08
+            }));
+        
+        Self { 
+            extracted_data,
+            hub_connector: grpc_hub_connector::GrpcHubConnector::with_hub_endpoint(hub_endpoint),
+            service_id: Some(service_id),
+        }
     }
 }
 
@@ -104,31 +145,57 @@ impl web_content_extract::web_content_extract_server::WebContentExtract for WebC
         let req = request.into_inner();
         println!("🌐 WebContentExtract.ExtractFinancialData called for URL: {}", req.url);
         
-        // Simulate web scraping and data extraction
-        let extracted_data = self.extracted_data.get(&req.url)
-            .cloned()
-            .unwrap_or_else(|| {
-                // Generate mock data if URL not found
-                serde_json::json!({
-                    "dividend_amount": 1.25,
-                    "payment_date": "2024-02-15",
-                    "stock_symbol": "MSFT",
-                    "company_name": "Microsoft Corporation",
-                    "ex_dividend_date": "2024-02-08",
-                    "dividend_frequency": "quarterly",
-                    "yield_percentage": 0.32
-                })
+        // Report busy status (fire-and-forget, no blocking)
+        if let Some(service_id) = &self.service_id {
+            let hub_connector = self.hub_connector.clone();
+            let service_id_clone = service_id.clone();
+            
+            // Fire-and-forget task - don't wait for completion
+            tokio::spawn(async move {
+                let _ = hub_connector.set_service_busy(&service_id_clone).await;
             });
+        }
         
-        let confidence_score = if req.url.contains("financial-data.com") { 0.95 } else { 0.75 };
+        let result = async {
+            // Simulate web scraping and data extraction
+            let extracted_data = self.extracted_data.get(&req.url)
+                .cloned()
+                .unwrap_or_else(|| {
+                    // Generate mock data if URL not found
+                    serde_json::json!({
+                        "dividend_amount": 1.25,
+                        "payment_date": "2024-02-15",
+                        "stock_symbol": "MSFT",
+                        "company_name": "Microsoft Corporation",
+                        "ex_dividend_date": "2024-02-08",
+                        "dividend_frequency": "quarterly",
+                        "yield_percentage": 0.32
+                    })
+                });
+            
+            let confidence_score = if req.url.contains("financial-data.com") { 0.95 } else { 0.75 };
+
+            Ok(Response::new(web_content_extract::ExtractFinancialDataResponse {
+                success: true,
+                data: extracted_data.to_string(),
+                confidence_score,
+                extraction_method: "ai_parser".to_string(),
+                processing_time_ms: 150,
+            }))
+        }.await;
         
-        Ok(Response::new(web_content_extract::ExtractFinancialDataResponse {
-            success: true,
-            data: extracted_data.to_string(),
-            confidence_score,
-            extraction_method: "ai_parser".to_string(),
-            processing_time_ms: 150,
-        }))
+        // Report online status (fire-and-forget, no blocking)
+        if let Some(service_id) = &self.service_id {
+            let hub_connector = self.hub_connector.clone();
+            let service_id_clone = service_id.clone();
+            
+            // Fire-and-forget task - don't wait for completion
+            tokio::spawn(async move {
+                let _ = hub_connector.set_service_online(&service_id_clone).await;
+            });
+        }
+        
+        result
     }
 
     async fn extract_text_content(
@@ -215,7 +282,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start the gRPC server in a background task
     let addr = format!("127.0.0.1:{}", args.port).parse()?;
-    let web_extract_service = WebContentExtractService::new();
+    let hub_endpoint = format!("http://{}:{}", args.grpc_hub_host, args.grpc_hub_port);
+    let web_extract_service = WebContentExtractService::new_with_service_id(hub_endpoint, service_id.clone());
     
     println!("🚀 Web Content Extract Service starting on {}", addr);
     
