@@ -19,6 +19,9 @@ service GrpcHub {
   // Health check
   rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
   
+  // Update service status
+  rpc UpdateServiceStatus(UpdateServiceStatusRequest) returns (UpdateServiceStatusResponse);
+  
   // Service-to-service communication through the hub
   rpc CallService(ServiceCallRequest) returns (ServiceCallResponse);
   
@@ -86,6 +89,16 @@ message HealthCheckRequest {
 
 message HealthCheckResponse {
   bool healthy = 1;
+  string message = 2;
+}
+
+message UpdateServiceStatusRequest {
+  string service_id = 1;
+  string status = 2; // "online", "offline", "busy"
+}
+
+message UpdateServiceStatusResponse {
+  bool success = 1;
   string message = 2;
 }
 

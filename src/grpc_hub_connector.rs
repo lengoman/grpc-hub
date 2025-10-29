@@ -9,12 +9,13 @@ mod grpc_hub {
 }
 
 use grpc_hub::grpc_hub_client::GrpcHubClient;
-use grpc_hub::ListServicesRequest;
+use grpc_hub::{ListServicesRequest, UpdateServiceStatusRequest};
 
 /// A reusable connector for discovering and connecting to services through the gRPC hub
 #[derive(Debug, Clone)]
 pub struct GrpcHubConnector {
-    hub_endpoint: String,
+    hub_host: String,
+    hub_port: u16,
     service_cache: Arc<RwLock<Option<(String, u16)>>>,
     cache_timestamp: Arc<AtomicU64>,
     cache_duration_seconds: u64,
@@ -23,17 +24,37 @@ pub struct GrpcHubConnector {
 impl GrpcHubConnector {
     /// Create a new connector with default settings
     pub fn new() -> Self {
-        Self::with_hub_endpoint("http://127.0.0.1:50099".to_string())
+        Self::with_hub_connection("127.0.0.1".to_string(), 50099)
     }
 
-    /// Create a new connector with a custom hub endpoint
-    pub fn with_hub_endpoint(hub_endpoint: String) -> Self {
+    /// Create a new connector with custom hub host and port
+    pub fn with_hub_connection(hub_host: String, hub_port: u16) -> Self {
         Self {
-            hub_endpoint,
+            hub_host,
+            hub_port,
             service_cache: Arc::new(RwLock::new(None)),
             cache_timestamp: Arc::new(AtomicU64::new(0)),
             cache_duration_seconds: 30, // Default 30 seconds cache
         }
+    }
+
+    /// Create a new connector with a custom hub endpoint (for backward compatibility)
+    pub fn with_hub_endpoint(hub_endpoint: String) -> Self {
+        // Parse the endpoint to extract host and port
+        let (host, port) = if hub_endpoint.starts_with("http://") {
+            let without_protocol = &hub_endpoint[7..];
+            if let Some(colon_pos) = without_protocol.find(':') {
+                let host = without_protocol[..colon_pos].to_string();
+                let port = without_protocol[colon_pos + 1..].parse().unwrap_or(50099);
+                (host, port)
+            } else {
+                (without_protocol.to_string(), 50099)
+            }
+        } else {
+            (hub_endpoint, 50099)
+        };
+        
+        Self::with_hub_connection(host, port)
     }
 
     /// Set custom cache duration in seconds
@@ -44,7 +65,17 @@ impl GrpcHubConnector {
 
     /// Get the hub endpoint
     pub fn get_hub_endpoint(&self) -> String {
-        self.hub_endpoint.clone()
+        format!("http://{}:{}", self.hub_host, self.hub_port)
+    }
+
+    /// Get the hub host
+    pub fn get_hub_host(&self) -> String {
+        self.hub_host.clone()
+    }
+
+    /// Get the hub port
+    pub fn get_hub_port(&self) -> u16 {
+        self.hub_port
     }
 
     /// Get the address and port of a service, using cache if available
@@ -69,9 +100,10 @@ impl GrpcHubConnector {
         println!("🔍 [DEBUG] GrpcHubConnector: Starting service discovery for: {}", service_name);
         
         // Connect to the hub's gRPC API
-        println!("🔍 [DEBUG] GrpcHubConnector: Connecting to hub at {}", self.hub_endpoint);
+        let hub_endpoint = self.get_hub_endpoint();
+        println!("🔍 [DEBUG] GrpcHubConnector: Connecting to hub at {}", hub_endpoint);
         
-        let mut hub_client = GrpcHubClient::connect(self.hub_endpoint.clone()).await?;
+        let mut hub_client = GrpcHubClient::connect(hub_endpoint).await?;
         println!("🔍 [DEBUG] GrpcHubConnector: Successfully connected to hub");
         
         // Get registered services from the hub
@@ -124,7 +156,8 @@ impl GrpcHubConnector {
     pub async fn list_all_services(&self) -> Result<Vec<grpc_hub::ServiceInfo>> {
         println!("🔍 [DEBUG] GrpcHubConnector: Listing all services from hub");
         
-        let mut hub_client = GrpcHubClient::connect(self.hub_endpoint.clone()).await?;
+        let hub_endpoint = self.get_hub_endpoint();
+        let mut hub_client = GrpcHubClient::connect(hub_endpoint).await?;
         
         let request = tonic::Request::new(ListServicesRequest {
             filter: None,
@@ -164,62 +197,54 @@ impl GrpcHubConnector {
         (has_cached, last_update)
     }
 
-    /// Set service status to busy (optimized for speed)
+    /// Set service status to busy (using gRPC)
     pub async fn set_service_busy(&self, service_id: &str) -> Result<()> {
-        let hub_endpoint = self.get_hub_endpoint();
-        let hub_url = format!("{}/api/service-status", hub_endpoint.replace("http://", "http://").replace(":50099", ":8080"));
+        println!("🔍 [DEBUG] GrpcHubConnector: Setting service {} to busy via gRPC", service_id);
         
-        let request_body = serde_json::json!({
-            "service_id": service_id,
-            "status": "busy"
+        let hub_endpoint = self.get_hub_endpoint();
+        let mut client = GrpcHubClient::connect(hub_endpoint).await?;
+        
+        let request = tonic::Request::new(UpdateServiceStatusRequest {
+            service_id: service_id.to_string(),
+            status: "busy".to_string(),
         });
         
-        // Single attempt with short timeout for speed
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(50)) // 50ms timeout
-            .build()?;
-            
-        let response = client
-            .post(&hub_url)
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
-        
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to set service busy: {}", response.status()));
+        match client.update_service_status(request).await {
+            Ok(response) => {
+                println!("✅ [DEBUG] GrpcHubConnector: Successfully set service busy via gRPC: {}", 
+                         response.into_inner().message);
+                Ok(())
+            }
+            Err(e) => {
+                println!("❌ [DEBUG] GrpcHubConnector: Failed to set service busy via gRPC: {}", e);
+                Err(anyhow::anyhow!("Failed to set service busy via gRPC: {}", e))
+            }
         }
-        
-        Ok(())
     }
 
-    /// Set service status to online (optimized for speed)
+    /// Set service status to online (using gRPC)
     pub async fn set_service_online(&self, service_id: &str) -> Result<()> {
-        let hub_endpoint = self.get_hub_endpoint();
-        let hub_url = format!("{}/api/service-status", hub_endpoint.replace("http://", "http://").replace(":50099", ":8080"));
+        println!("🔍 [DEBUG] GrpcHubConnector: Setting service {} to online via gRPC", service_id);
         
-        let request_body = serde_json::json!({
-            "service_id": service_id,
-            "status": "online"
+        let hub_endpoint = self.get_hub_endpoint();
+        let mut client = GrpcHubClient::connect(hub_endpoint).await?;
+        
+        let request = tonic::Request::new(UpdateServiceStatusRequest {
+            service_id: service_id.to_string(),
+            status: "online".to_string(),
         });
         
-        // Single attempt with short timeout for speed
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(50)) // 50ms timeout
-            .build()?;
-            
-        let response = client
-            .post(&hub_url)
-            .header("Content-Type", "application/json")
-            .json(&request_body)
-            .send()
-            .await?;
-        
-        if !response.status().is_success() {
-            return Err(anyhow::anyhow!("Failed to set service online: {}", response.status()));
+        match client.update_service_status(request).await {
+            Ok(response) => {
+                println!("✅ [DEBUG] GrpcHubConnector: Successfully set service online via gRPC: {}", 
+                         response.into_inner().message);
+                Ok(())
+            }
+            Err(e) => {
+                println!("❌ [DEBUG] GrpcHubConnector: Failed to set service online via gRPC: {}", e);
+                Err(anyhow::anyhow!("Failed to set service online via gRPC: {}", e))
+            }
         }
-        
-        Ok(())
     }
 }
 

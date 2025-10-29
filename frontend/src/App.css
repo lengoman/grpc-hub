@@ -229,6 +229,11 @@ body {
   box-shadow: 0 4px 12px var(--shadow);
 }
 
+.service-item.busy {
+  border-left: 4px solid #ff8c00;
+  background: linear-gradient(135deg, rgba(255, 140, 0, 0.05) 0%, rgba(255, 140, 0, 0.02) 100%);
+}
+
 .service-item-header {
   display: flex;
   justify-content: space-between;
@@ -269,6 +274,12 @@ body {
 .service-status.offline {
   background: rgba(244, 67, 54, 0.15);
   color: #f44336;
+  animation: pulse 2s infinite;
+}
+
+.service-status.busy {
+  background: rgba(255, 140, 0, 0.15);
+  color: #ff8c00;
   animation: pulse 2s infinite;
 }
 

@@ -80,6 +80,15 @@ impl DividendService {
         }
     }
 
+    fn new_with_hub_connection(hub_host: String, hub_port: u16, service_id: String) -> Self {
+        Self {
+            dividend_history: std::collections::HashMap::new(),
+            hub_connector: grpc_hub_connector::GrpcHubConnector::with_hub_connection(hub_host, hub_port),
+            web_content_mutex: Arc::new(Mutex::new(())),
+            service_id: Some(service_id),
+        }
+    }
+
     /// Get the current service ID from the hub
     async fn get_service_id(&self) -> Option<String> {
         println!("🔍 [DEBUG] get_service_id: Returning service_id: {:?}", self.service_id);
@@ -283,7 +292,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   - Service Port: {}", args.port);
     println!("   - gRPC Hub: {}:{}", args.grpc_hub_host, args.grpc_hub_port);
     
-    // Build hub endpoint from arguments
+    // Build hub endpoint from arguments (for backward compatibility)
     let hub_endpoint = format!("http://{}:{}", args.grpc_hub_host, args.grpc_hub_port);
     
     // Connect to the gRPC hub
@@ -313,8 +322,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let service_id = register_response.service_id.clone();
     println!("✅ Registered dividend-service: {}", service_id);
     
-    // Create the dividend service instance with the hub endpoint and service ID
-    let dividend_service_instance = DividendService::new_with_service_id(hub_endpoint, service_id.clone());
+    // Create the dividend service instance with the hub connection parameters and service ID
+    let dividend_service_instance = DividendService::new_with_hub_connection(
+        args.grpc_hub_host.clone(), 
+        args.grpc_hub_port, 
+        service_id.clone()
+    );
     
     // Note: Polling task removed to prevent race conditions with user requests
     // The dividend service works on-demand when users call GetDividendHistory

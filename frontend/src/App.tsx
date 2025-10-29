@@ -2,12 +2,7 @@ import { useState, useEffect } from 'react';
 import { useEventSource } from './hooks/useEventSource';
 import './App.css';
 
-// Extend Window interface to include setServiceStatus
-declare global {
-  interface Window {
-    setServiceStatus?: (serviceId: string, status: string) => void;
-  }
-}
+// Service status updates are now handled by SSE events only
 
 interface Service {
   service_id: string;
@@ -61,24 +56,7 @@ function App() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [selectedService, setSelectedService] = useState<string | null>(null);
 
-  // Function to update service status locally
-  const setServiceStatus = (serviceId: string, status: string) => {
-    setServices(prevServices => 
-      prevServices.map(service => 
-        service.service_id === serviceId 
-          ? { ...service, status }
-          : service
-      )
-    );
-  };
-
-  // Make setServiceStatus available globally for ServiceCard
-  useEffect(() => {
-    (window as any).setServiceStatus = setServiceStatus;
-    return () => {
-      delete (window as any).setServiceStatus;
-    };
-  }, []);
+  // Note: Service status updates now come only from SSE events, not local state changes
 
   // Detect system theme preference
   useEffect(() => {
@@ -212,14 +190,16 @@ function App() {
                 return (
                   <div 
                     key={service.service_id}
-                    className={`service-item ${selectedService === service.service_id ? 'selected' : ''}`}
+                    className={`service-item ${selectedService === service.service_id ? 'selected' : ''} ${service.status === 'busy' ? 'busy' : ''}`}
                     onClick={() => setSelectedService(service.service_id)}
                   >
                     <div className="service-item-header">
                       <span className="service-item-name">{service.service_name}</span>
                       <span className="service-item-version">v{service.service_version}</span>
                       <span className={`service-status ${service.status}`}>
-                        {service.status === 'online' ? '🟢' : '🔴'}
+                        {service.status === 'online' && '🟢'}
+                        {service.status === 'offline' && '🔴'}
+                        {service.status === 'busy' && '🟠'}
                       </span>
                     </div>
                     <div className="service-item-address">{service.service_address}:{service.service_port}</div>
@@ -274,7 +254,6 @@ function ServiceCard({
   onUnregister: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<string>('methods');
-  const [isTesting, setIsTesting] = useState(false);
   const [testResults, setTestResults] = useState<ServiceCall[]>([]);
   const [selectedMethod, setSelectedMethod] = useState<string>('');
   const [requestData, setRequestData] = useState<string>('{}');
@@ -285,16 +264,10 @@ function ServiceCard({
   const testServiceMethod = async () => {
     if (!selectedMethod) return;
     
-    setIsTesting(true);
+    // Don't set global isTesting state - allow multiple concurrent calls
     const timestamp = new Date().toISOString();
     
-    // Set service to busy locally during the call
-    const setServiceBusy = (busy: boolean) => {
-      // This will be handled by the parent component
-      if (window.setServiceStatus) {
-        window.setServiceStatus(service.service_id, busy ? 'busy' : 'online');
-      }
-    };
+    // Note: Service status changes are now handled by SSE events from the backend
     
     try {
       let request: any;
@@ -319,8 +292,7 @@ function ServiceCard({
         }
       };
 
-      // Set service to busy before making the call
-      setServiceBusy(true);
+      // Note: Service status changes are handled by SSE events from the backend
 
       const response = await fetch(`/api/grpc-call`, {
         method: 'POST',
@@ -359,10 +331,6 @@ function ServiceCard({
       if (autoOpenResults) {
         setActiveTab('results');
       }
-    } finally {
-      // Set service back to online after the call completes
-      setServiceBusy(false);
-      setIsTesting(false);
     }
   };
 
@@ -505,10 +473,10 @@ function ServiceCard({
                   <button
                     className="test-button"
                     onClick={testServiceMethod}
-                    disabled={isTesting || service.status === 'offline'}
-                    title={service.status === 'offline' ? 'Service is offline and cannot be called' : ''}
+                    disabled={service.status === 'offline'}
+                    title={service.status === 'offline' ? 'Service is offline and cannot be called' : service.status === 'busy' ? 'Service is busy but you can still make calls' : ''}
                   >
-                    {isTesting ? 'Testing...' : service.status === 'offline' ? 'Service Offline' : 'Test Method'}
+                    {service.status === 'offline' ? 'Service Offline' : 'Test Method'}
                   </button>
                   <button
                     className="cancel-button"

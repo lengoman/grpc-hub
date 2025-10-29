@@ -128,6 +128,37 @@ impl WebContentExtractService {
             service_id: Some(service_id),
         }
     }
+
+    fn new_with_hub_connection(hub_host: String, hub_port: u16, service_id: String) -> Self {
+        let mut extracted_data = std::collections::HashMap::new();
+        
+        // Pre-populate with some sample financial data
+        extracted_data.insert("https://financial-data.com/dividend-info".to_string(), 
+            serde_json::json!({
+                "dividend_amount": 2.50,
+                "payment_date": "2024-01-15",
+                "stock_symbol": "AAPL",
+                "company_name": "Apple Inc.",
+                "ex_dividend_date": "2024-01-08",
+                "dividend_frequency": "quarterly",
+                "yield_percentage": 0.45
+            }));
+            
+        extracted_data.insert("https://financial-data.com/earnings".to_string(),
+            serde_json::json!({
+                "revenue": 123900000000i64,
+                "net_income": 33980000000i64,
+                "eps": 2.18,
+                "quarter": "Q4 2023",
+                "growth_rate": 0.08
+            }));
+        
+        Self { 
+            extracted_data,
+            hub_connector: grpc_hub_connector::GrpcHubConnector::with_hub_connection(hub_host, hub_port),
+            service_id: Some(service_id),
+        }
+    }
 }
 
 impl Default for WebContentExtractService {
@@ -147,6 +178,7 @@ impl web_content_extract::web_content_extract_server::WebContentExtract for WebC
         
         // Report busy status (fire-and-forget, no blocking)
         if let Some(service_id) = &self.service_id {
+            println!("🟠 [DEBUG] WebContentExtract: Reporting busy status for service_id: {}", service_id);
             let hub_connector = self.hub_connector.clone();
             let service_id_clone = service_id.clone();
             
@@ -154,9 +186,16 @@ impl web_content_extract::web_content_extract_server::WebContentExtract for WebC
             tokio::spawn(async move {
                 let _ = hub_connector.set_service_busy(&service_id_clone).await;
             });
+        } else {
+            println!("⚠️ [DEBUG] WebContentExtract: No service_id available for busy status reporting");
         }
         
         let result = async {
+            // This is to test the service making it slow - BEFORE processing
+            println!("🐌 [DEBUG] WebContentExtract: Starting 5-second sleep for load balancing test");
+            // tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+            println!("✅ [DEBUG] WebContentExtract: Sleep completed, processing request");
+            
             // Simulate web scraping and data extraction
             let extracted_data = self.extracted_data.get(&req.url)
                 .cloned()
@@ -282,8 +321,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     // Start the gRPC server in a background task
     let addr = format!("127.0.0.1:{}", args.port).parse()?;
-    let hub_endpoint = format!("http://{}:{}", args.grpc_hub_host, args.grpc_hub_port);
-    let web_extract_service = WebContentExtractService::new_with_service_id(hub_endpoint, service_id.clone());
+    let web_extract_service = WebContentExtractService::new_with_hub_connection(
+        args.grpc_hub_host.clone(), 
+        args.grpc_hub_port, 
+        service_id.clone()
+    );
     
     println!("🚀 Web Content Extract Service starting on {}", addr);
     

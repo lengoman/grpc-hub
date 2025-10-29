@@ -1,6 +1,7 @@
 use clap::Parser;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 use tokio_stream::wrappers::ReceiverStream;
 use futures_util::StreamExt;
@@ -142,6 +143,7 @@ impl From<ServiceInfo> for grpc_hub::ServiceInfo {
 struct GrpcHubService {
     services: Arc<RwLock<HashMap<String, ServiceInfo>>>,
     event_senders: Arc<RwLock<Vec<tokio::sync::broadcast::Sender<SSEEvent>>>>,
+    service_counters: Arc<RwLock<HashMap<String, AtomicU64>>>, // Round-robin counters per service name
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +157,7 @@ impl Default for GrpcHubService {
         Self {
             services: Arc::new(RwLock::new(HashMap::new())),
             event_senders: Arc::new(RwLock::new(Vec::new())),
+            service_counters: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -180,9 +183,10 @@ impl GrpcHubService {
         let mut services = self.services.write().await;
         if let Some(service) = services.get_mut(service_id) {
             println!("🔍 [DEBUG] set_service_busy: Found service {}, current status: {}", service.service_name, service.status);
-            if service.status == "online" {
+            let old_status = service.status.clone();
+            if old_status != "busy" {
                 service.status = "busy".to_string();
-                println!("🔄 Service {} is now busy", service.service_name);
+                println!("🔄 Service {} status changed: {} -> busy", service.service_name, old_status);
                 
                 // Broadcast status change
                 self.broadcast_event(SSEEvent {
@@ -194,7 +198,7 @@ impl GrpcHubService {
                     }).to_string(),
                 }).await;
             } else {
-                println!("🔍 [DEBUG] set_service_busy: Service {} is not online (status: {}), not setting to busy", service.service_name, service.status);
+                println!("⚠️  Service {} is already busy (no change needed)", service.service_name);
             }
         } else {
             println!("❌ [DEBUG] set_service_busy: Service {} not found in services map", service_id);
@@ -202,11 +206,13 @@ impl GrpcHubService {
     }
 
     async fn set_service_online(&self, service_id: &str) {
+        println!("🔍 [DEBUG] set_service_online: Attempting to set service {} to online", service_id);
         let mut services = self.services.write().await;
         if let Some(service) = services.get_mut(service_id) {
-            if service.status == "busy" {
+            let old_status = service.status.clone();
+            if old_status != "online" {
                 service.status = "online".to_string();
-                println!("✅ Service {} is now online", service.service_name);
+                println!("✅ Service {} status changed: {} -> online", service.service_name, old_status);
                 
                 // Broadcast status change
                 self.broadcast_event(SSEEvent {
@@ -217,7 +223,11 @@ impl GrpcHubService {
                         "status": "online"
                     }).to_string(),
                 }).await;
+            } else {
+                println!("⚠️  Service {} is already online (no change needed)", service.service_name);
             }
+        } else {
+            println!("❌ [DEBUG] set_service_online: Service {} not found in services map", service_id);
         }
     }
 
@@ -254,15 +264,30 @@ impl GrpcHubService {
         println!("🔍 [DEBUG] get_best_service_by_name: Found {} services with name '{}'", matching_services.len(), service_name);
         
         // Prioritize services that are online and not busy
-        let online_services: Vec<_> = matching_services.iter()
+        let available_services: Vec<_> = matching_services.iter()
             .filter(|service| service.status == "online")
             .collect();
         
-        let selected_service = if !online_services.is_empty() {
-            println!("✅ [DEBUG] get_best_service_by_name: Found {} online services, selecting first", online_services.len());
-            online_services[0]
+        let selected_service = if !available_services.is_empty() {
+            // Implement round-robin load balancing
+            let service_name = &available_services[0].service_name;
+            let current_count = {
+                let mut counters = self.service_counters.write().await;
+                let counter = counters.entry(service_name.clone()).or_insert_with(|| AtomicU64::new(0));
+                counter.fetch_add(1, Ordering::Relaxed)
+            };
+            
+            let selected_index = (current_count as usize) % available_services.len();
+            let selected = available_services[selected_index];
+            
+            println!("✅ [DEBUG] get_best_service_by_name: Found {} available services, using round-robin (index: {}/{})", 
+                     available_services.len(), selected_index, available_services.len());
+            println!("🎯 [DEBUG] Round-robin selected: {}:{} (counter: {})", 
+                     selected.service_address, selected.service_port, current_count);
+            
+            selected
         } else {
-            println!("⚠️  [DEBUG] get_best_service_by_name: No online services, selecting first available");
+            println!("⚠️  [DEBUG] get_best_service_by_name: No available services, selecting first available");
             matching_services[0]
         };
         
@@ -555,12 +580,82 @@ impl GrpcHub for GrpcHubService {
 
     async fn call_service(
         &self,
-        _request: Request<ServiceCallRequest>,
+        request: Request<ServiceCallRequest>,
     ) -> Result<Response<ServiceCallResponse>, Status> {
-        // For now, return an error indicating reflection is in development
-        Err(Status::unimplemented(
-            "Full dynamic gRPC reflection is in development. The hub framework is ready but needs implementation of the ServerReflection API client."
-        ))
+        let req = request.into_inner();
+        
+        println!("🔍 [DEBUG] gRPC CallService: {} -> {}", req.target_service, req.method);
+        
+        // Parse the request data
+        let request_data: serde_json::Value = match serde_json::from_str(&req.request_data) {
+            Ok(data) => data,
+            Err(e) => {
+                return Ok(Response::new(ServiceCallResponse {
+                    success: false,
+                    response_data: "".to_string(),
+                    error_message: format!("Invalid JSON in request data: {}", e),
+                    status_code: 400,
+                }));
+            }
+        };
+        
+        // Extract service name from full gRPC service name (e.g., "web_content_extract.WebContentExtract" -> "web-content-extract")
+        let short_service_name = req.target_service.split('.').next().unwrap_or(&req.target_service)
+            .replace("_", "-")
+            .to_lowercase();
+        
+        println!("🔍 [DEBUG] Hub: Intelligent selection mode for service: {}", short_service_name);
+        
+        // Get the best available service
+        let (service_id, host, port) = match self.get_best_service_by_name(&short_service_name).await {
+            Some((id, h, p)) => {
+                println!("🎯 [DEBUG] Hub: Selected service {} at {}:{}", id, h, p);
+                (id, h, p)
+            }
+            None => {
+                return Ok(Response::new(ServiceCallResponse {
+                    success: false,
+                    response_data: "".to_string(),
+                    error_message: format!("No available service found for '{}'", short_service_name),
+                    status_code: 404,
+                }));
+            }
+        };
+        
+        // Set service to busy before making the call
+        println!("🔍 [DEBUG] Hub: Setting service {} to busy", service_id);
+        self.set_service_busy(&service_id).await;
+        
+        // Call the gRPC method using grpcurl
+        let result = call_grpc_method(
+            &host,
+            port,
+            &req.target_service,
+            &req.method,
+            request_data,
+        ).await;
+        
+        // Set service back to online after the call
+        self.set_service_online(&service_id).await;
+        
+        match result {
+            Ok(response_data) => {
+                Ok(Response::new(ServiceCallResponse {
+                    success: true,
+                    response_data: serde_json::to_string(&response_data).unwrap_or_else(|_| "{}".to_string()),
+                    error_message: "".to_string(),
+                    status_code: 200,
+                }))
+            }
+            Err(e) => {
+                Ok(Response::new(ServiceCallResponse {
+                    success: false,
+                    response_data: "".to_string(),
+                    error_message: e.to_string(),
+                    status_code: 500,
+                }))
+            }
+        }
     }
 
     type SubscribeToServiceStream = ReceiverStream<Result<ServiceEvent, Status>>;
@@ -581,6 +676,52 @@ impl GrpcHub for GrpcHubService {
         })).await;
         
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn update_service_status(
+        &self,
+        request: Request<UpdateServiceStatusRequest>,
+    ) -> Result<Response<UpdateServiceStatusResponse>, Status> {
+        let req = request.into_inner();
+        
+        println!("🔍 [DEBUG] UpdateServiceStatus: Service {} status -> {}", req.service_id, req.status);
+        
+        let service_name = {
+            let mut services = self.services.write().await;
+            if let Some(service) = services.get_mut(&req.service_id) {
+                let old_status = service.status.clone();
+                service.status = req.status.clone();
+                let service_name = service.service_name.clone();
+                
+                println!("🔄 Service {} status changed: {} -> {}", service_name, old_status, req.status);
+                
+                if old_status != req.status {
+                    Some(service_name)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }; // Lock is dropped here
+        
+        // Broadcast status change if it actually changed
+        if let Some(name) = service_name {
+            self.broadcast_event(SSEEvent {
+                event_type: "status_change".to_string(),
+                data: serde_json::json!({
+                    "service_id": req.service_id,
+                    "service_name": name,
+                    "status": req.status,
+                    "reason": "Service reported status change via gRPC"
+                }).to_string(),
+            }).await;
+        }
+        
+        Ok(Response::new(UpdateServiceStatusResponse {
+            success: true,
+            message: format!("Service status updated to {}", req.status),
+        }))
     }
 }
 
@@ -720,6 +861,8 @@ async fn handle_http_request(
                 .unwrap())
         }
         (&Method::POST, "/api/service-status") => {
+            println!("🔍 [DEBUG] Hub: Received service-status request");
+            
             // Read request body
             let bytes = match http_body_util::BodyExt::collect(req.into_body()).await {
                 Ok(body) => body.to_bytes(),
@@ -736,6 +879,7 @@ async fn handle_http_request(
                 }
             };
             let body_str = String::from_utf8_lossy(&bytes);
+            println!("🔍 [DEBUG] Hub: Service-status request body: {}", body_str);
             
             let request: serde_json::Value = match serde_json::from_str(&body_str) {
                 Ok(req) => req,
