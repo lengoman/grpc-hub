@@ -261,14 +261,14 @@ mod tests {
     #[tokio::test]
     async fn test_connector_creation() {
         let connector = GrpcHubConnector::new();
-        assert_eq!(connector.hub_endpoint, "http://127.0.0.1:50099");
+        assert_eq!(connector.get_hub_endpoint(), "http://127.0.0.1:50099");
         assert_eq!(connector.cache_duration_seconds, 30);
     }
 
     #[tokio::test]
     async fn test_connector_with_custom_endpoint() {
         let connector = GrpcHubConnector::with_hub_endpoint("http://localhost:9999".to_string());
-        assert_eq!(connector.hub_endpoint, "http://localhost:9999");
+        assert_eq!(connector.get_hub_endpoint(), "http://localhost:9999");
     }
 
     #[tokio::test]
