@@ -6,9 +6,6 @@ use chrono::Utc;
 use tonic_reflection::server::Builder;
 use clap::Parser;
 
-mod grpc_hub_connector {
-    include!("../grpc_hub_connector.rs");
-}
 
 mod grpc_hub {
     tonic::include_proto!("grpc_hub");

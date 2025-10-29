@@ -16,7 +16,6 @@ mod grpc_hub {
     tonic::include_proto!("grpc_hub");
 }
 
-mod grpc_hub_connector;
 
 
 #[derive(Parser, Debug)]

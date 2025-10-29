@@ -2,9 +2,6 @@ use clap::Parser;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
-mod grpc_hub_connector {
-    include!("../grpc_hub_connector.rs");
-}
 
 mod grpc_hub {
     tonic::include_proto!("grpc_hub");

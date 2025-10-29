@@ -517,6 +517,7 @@ dependencies = [
  "clap",
  "futures",
  "futures-util",
+ "grpc-hub-connector",
  "http-body-util",
  "hyper 1.7.0",
  "hyper-util",
@@ -532,6 +533,33 @@ dependencies = [
  "tonic",
  "tonic-build",
  "tonic-reflection",
+ "tower 0.4.13",
+ "tower-http",
+ "uuid",
+]
+
+[[package]]
+name = "grpc-hub-connector"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "chrono",
+ "futures",
+ "futures-util",
+ "http-body-util",
+ "hyper 1.7.0",
+ "hyper-util",
+ "prost 0.13.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-build",
  "tower 0.4.13",
  "tower-http",
  "uuid",

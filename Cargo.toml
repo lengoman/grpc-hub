@@ -1,9 +1,29 @@
-[package]
-name = "grpc-hub"
+[workspace]
+members = [
+    ".",
+    "grpc-hub-connector"
+]
+resolver = "2"
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/yourusername/grpc-hub"
+keywords = ["grpc", "hub", "microservices", "service-discovery"]
+categories = ["network-programming", "web-programming::http-server"]
+
+[package]
+name = "grpc-hub"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
+grpc-hub-connector = { path = "grpc-hub-connector" }
 tokio = { version = "1.0", features = ["full"] }
 tokio-stream = "0.1"
 futures-util = "0.3"
