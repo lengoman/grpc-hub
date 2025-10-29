@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package grpc_hub;
+
+// Service definition for the gRPC Hub
+service GrpcHub {
+  // Register a service with the hub
+  rpc RegisterService(RegisterServiceRequest) returns (RegisterServiceResponse);
+  
+  // Unregister a service from the hub
+  rpc UnregisterService(UnregisterServiceRequest) returns (UnregisterServiceResponse);
+  
+  // List all registered services
+  rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
+  
+  // Get service details
+  rpc GetService(GetServiceRequest) returns (GetServiceResponse);
+  
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+  
+  // Update service status
+  rpc UpdateServiceStatus(UpdateServiceStatusRequest) returns (UpdateServiceStatusResponse);
+  
+  // Service-to-service communication through the hub
+  rpc CallService(ServiceCallRequest) returns (ServiceCallResponse);
+  
+  // Subscribe to service events (for real-time communication)
+  rpc SubscribeToService(SubscribeRequest) returns (stream ServiceEvent);
+}
+
+message RegisterServiceRequest {
+  string service_name = 1;
+  string service_version = 2;
+  string service_address = 3;
+  string service_port = 4;
+  repeated string methods = 5;
+  map<string, string> metadata = 6;
+}
+
+message RegisterServiceResponse {
+  bool success = 1;
+  string message = 2;
+  string service_id = 3;
+}
+
+message UnregisterServiceRequest {
+  string service_id = 1;
+}
+
+message UnregisterServiceResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message ListServicesRequest {
+  optional string filter = 1;
+}
+
+message ListServicesResponse {
+  repeated ServiceInfo services = 1;
+}
+
+message GetServiceRequest {
+  string service_id = 1;
+}
+
+message GetServiceResponse {
+  optional ServiceInfo service = 1;
+  bool found = 2;
+}
+
+message ServiceInfo {
+  string service_id = 1;
+  string service_name = 2;
+  string service_version = 3;
+  string service_address = 4;
+  string service_port = 5;
+  repeated string methods = 6;
+  map<string, string> metadata = 7;
+  string registered_at = 8;
+  string last_heartbeat = 9;
+  string status = 10; // "online" or "offline"
+}
+
+message HealthCheckRequest {
+  string service_id = 1;
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string message = 2;
+}
+
+message UpdateServiceStatusRequest {
+  string service_id = 1;
+  string status = 2; // "online", "offline", "busy"
+}
+
+message UpdateServiceStatusResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Service-to-service communication messages
+message ServiceCallRequest {
+  string target_service = 1;
+  string method = 2;
+  string request_data = 3; // JSON string
+  string caller_service = 4;
+  map<string, string> headers = 5;
+}
+
+message ServiceCallResponse {
+  bool success = 1;
+  string response_data = 2; // JSON string
+  string error_message = 3;
+  int32 status_code = 4;
+}
+
+// Event subscription for real-time communication
+message SubscribeRequest {
+  string service_name = 1;
+  repeated string event_types = 2; // e.g., ["data_updated", "status_changed"]
+}
+
+message ServiceEvent {
+  string event_type = 1;
+  string service_name = 2;
+  string data = 3; // JSON string
+  string timestamp = 4;
+}
+
